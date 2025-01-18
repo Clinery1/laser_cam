@@ -4,8 +4,34 @@ cutter. It is designed to be as simple as possible and somewhat mimic the Amada 
 at work.
 
 
-## Supported DXF features
-***TBD***
+## DXF file caveats
+We only support lines and assume everything is already flat with no Z variations when rotated into
+the XY plane.
+
+### Why only lines?
+I use OpenSCAD to model my plywood parts and it apparently only ever exports lines, so this is all
+I am supporting for now.
+
+
+## List of features
+- ☐ DXF Loading
+- ☐ Recognize lines from line segments
+- ☐ Rotate parts if they are not in the XY plane
+
+- ☐ Text GUI
+
+- ☐ Rendering of the build space
+- ☐ Rendering of a sheet of material with coloring
+- ☐ Line rendering for the model
+
+- ☐ Navigation for the line rendering
+
+- ☐ GCODE output of the nested program
+
+- ☐ Configurable "laser conditions" where the laser operates at different powers
+- ☐ Coloring of lines with different laser conditions
+
+- ☐ GCODE simulator with coloring
 
 
 ## DISCLAIMER

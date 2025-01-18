@@ -483,6 +483,7 @@ dependencies = [
 name = "laser_cam"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "dxf",
 ]
 
