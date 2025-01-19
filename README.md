@@ -4,6 +4,9 @@ cutter. It is designed to be as simple as possible and somewhat mimic the Amada 
 at work.
 
 
+![Development screenshot](current_screenshot.png)
+
+
 ## DXF file caveats
 We only support lines and assume everything is already flat with no Z variations when rotated into
 the XY plane.
@@ -51,10 +54,6 @@ An area that represents some physical material where entities can be moved, rota
 - ☐ GCODE simulator with coloring
 
 - ☐ Detection of out-of-bounds entities using the outline and sheet border
-
-
-## Screenshots
-Movement and a GUI. ![Development screenshot](current_screenshot.png)
 
 
 ## DISCLAIMER
