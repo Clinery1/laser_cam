@@ -52,7 +52,7 @@ An area that represents some physical material where entities can be moved, rota
 
 
 ## Screenshots
-Basic movement, pan, zoom, selection. ![Development screenshot](current_screenshot.png)
+Movement and a GUI. ![Development screenshot](current_screenshot.png)
 
 
 ## DISCLAIMER
