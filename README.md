@@ -35,6 +35,10 @@ I am supporting for now.
 - ☐ GCODE simulator with coloring
 
 
+## Screenshots
+Basic movement, pan, zoom, selection. ![Development screenshot](current_screenshot.png)
+
+
 ## DISCLAIMER
 This is (at the time of writing) UNTESTED software. The GCODE generated may be wrong, it may be
 invalid, and it might just look bad.
