@@ -245,6 +245,9 @@ impl Model {
     pub fn paths(&self, mt: EntityTransform)->ModelPaths {
         let mut paths = Vec::with_capacity(self.lines.len());
 
+        let mut min = Point::new(999999999.0,999999999.0);
+        let mut max = Point::new(-99999999.0,-99999999.0);
+
         for line in self.lines.iter() {
             let (Line::Closed(points)|Line::Open(points)) = line;
 
@@ -253,10 +256,17 @@ impl Model {
             let mut points_iter = points.iter()
                 .copied()
                 .map(|p|{
-                    p_conv(transform_point(p, &mt))
+                    let p = transform_point(p, &mt);
+                    min.x = min.x.min(p.x);
+                    min.y = min.y.min(p.y);
+                    max.x = max.x.max(p.x);
+                    max.y = max.y.max(p.y);
+
+                    p_conv(p)
                 });
 
-            builder.move_to(points_iter.next().unwrap());
+            let start = points_iter.next().unwrap();
+            builder.move_to(start);
 
             for point in points_iter {
                 builder.line_to(point);
@@ -272,8 +282,8 @@ impl Model {
         }
 
         // build the outline
-        let outline_min = transform_point(self.min, &mt);
-        let outline_max = transform_point(self.max, &mt);
+        let outline_min = min;
+        let outline_max = max;
 
         // Build the outline as a rectangle based on the AABB
         let mut builder = PathBuilder::new();
