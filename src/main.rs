@@ -216,77 +216,79 @@ impl MainProgram {
     }
 
     fn sheet_list_view(&self)->Element<Message> {
-        column![
-            row![
-                // sheet selector
-                widget::pick_list(
-                    self.sheet_settings.as_slice(),
-                    Some(&self.sheet_settings[self.active_sheet]),
-                    |named_sheet|Message::SelectSheet(named_sheet.index),
-                ),
+        widget::scrollable(
+            column![
+                row![
+                    // sheet selector
+                    widget::pick_list(
+                        self.sheet_settings.as_slice(),
+                        Some(&self.sheet_settings[self.active_sheet]),
+                        |named_sheet|Message::SelectSheet(named_sheet.index),
+                    ),
 
-                widget::button("New sheet")
-                    .on_press(Message::NewSheet),
-            ],
+                    widget::button("New sheet")
+                        .on_press(Message::NewSheet),
+                ],
 
-            widget::Space::with_height(15.0),
+                widget::Space::with_height(15.0),
 
-            widget::button("Delete sheet")
-                .style(danger_button)
-                .on_press(Message::DeleteSheet),
+                widget::button("Delete sheet")
+                    .style(danger_button)
+                    .on_press(Message::DeleteSheet),
 
-            widget::Space::with_height(5.0),
+                widget::Space::with_height(5.0),
 
-            row![
-                "Rename: ",
-                widget::text_input(
-                    "Sheet name",
-                    self.sheet_settings[self.active_sheet].name.as_str(),
-                )
-                    .on_input(|s|Message::RenameSheet(s)),
-            ],
+                row![
+                    "Rename: ",
+                    widget::text_input(
+                        "Sheet name",
+                        self.sheet_settings[self.active_sheet].name.as_str(),
+                    )
+                        .on_input(|s|Message::RenameSheet(s)),
+                ],
 
-            row![
-                "Width: ",
-                widget::text_input(
-                    "Width",
-                    &self.sheet_size[0],
-                )
-                    .on_input(Message::ChangeSheetWidth),
-            ],
+                row![
+                    "Width: ",
+                    widget::text_input(
+                        "Width",
+                        &self.sheet_size[0],
+                    )
+                        .on_input(Message::ChangeSheetWidth),
+                ],
 
-            row![
-                "Height: ",
-                widget::text_input(
-                    "Height",
-                    &self.sheet_size[1],
-                )
-                    .on_input(Message::ChangeSheetHeight),
-            ],
+                row![
+                    "Height: ",
+                    widget::text_input(
+                        "Height",
+                        &self.sheet_size[1],
+                    )
+                        .on_input(Message::ChangeSheetHeight),
+                ],
 
-            row![
-                "Feed: ",
-                widget::text_input(
-                    "Feed",
-                    &self.sheet_settings[self.active_sheet].feedrate.to_string(),
-                )
-                    .on_input(Message::ChangeSheetFeed),
-            ],
+                row![
+                    "Feed: ",
+                    widget::text_input(
+                        "Feed",
+                        &self.sheet_settings[self.active_sheet].feedrate.to_string(),
+                    )
+                        .on_input(Message::ChangeSheetFeed),
+                ],
 
-            row![
-                "Laser Power: ",
-                widget::text_input(
-                    "Power",
-                    &self.sheet_settings[self.active_sheet].laser_power.to_string(),
-                )
-                    .on_input(Message::ChangeSheetPower),
-            ],
+                row![
+                    "Laser Power: ",
+                    widget::text_input(
+                        "Power",
+                        &self.sheet_settings[self.active_sheet].laser_power.to_string(),
+                    )
+                        .on_input(Message::ChangeSheetPower),
+                ],
 
-            widget::button("Save GCODE")
-                .on_press(Message::OpenGcodeSaveDialog)
-        ]
-            .clip(true)
-            .padding(5.0)
+                widget::button("Save GCODE")
+                    .on_press(Message::OpenGcodeSaveDialog)
+            ]
+                .padding(5.0)
+        )
+            .width(Length::Fill)
             .into()
     }
 
@@ -340,6 +342,7 @@ impl MainProgram {
             widget::column(column_items)
                 .padding(5.0)
         )
+            .width(Length::Fill)
             .into()
     }
 
@@ -407,6 +410,7 @@ impl MainProgram {
             ]
                 .padding(5.0)
         )
+            .width(Length::Fill)
             .into()
     }
 
@@ -431,18 +435,7 @@ impl MainProgram {
                         });
 
                         self.close_entity_params();
-
-                        let (pane, _) = self.panes.iter()
-                            .map(|(p,s)|(*p,*s))
-                            .find(|(_,state)|*state==ProgramPane::ModelList)
-                            .unwrap();
-                        let (_, split) = self.panes.split(
-                            pane_grid::Axis::Horizontal,
-                            pane,
-                            ProgramPane::ModelParams,
-                        )
-                            .unwrap();
-                        self.panes.resize(split, 0.35);
+                        self.open_entity_params();
                     },
                     SheetMessage::Deselect(_)=>{
                         self.entity_params = None;
@@ -686,10 +679,15 @@ impl MainProgram {
                 }
             },
             Message::OpenGcodeSaveDialog=>{
+                let start = std::time::Instant::now();
+
                 let settings = &mut self.sheet_settings[self.active_sheet];
                 let gcode = self.sheets[self.active_sheet]
                     .generate_gcode(settings.laser_power, settings.feedrate, settings.name.as_str());
                 settings.gcode = Some(gcode);
+
+                let elapsed = start.elapsed();
+                eprintln!("GCODE Generated in {elapsed:?}");
 
                 let future = AsyncFileDialog::new()
                     .add_filter("GCODE Files", &["gcode", "nc"])
@@ -704,9 +702,24 @@ impl MainProgram {
     }
 
     fn close_entity_params(&mut self) {
-        let pane = self.panes.iter().map(|(p,s)|(*p,*s)).find(|(_,state)|*state==ProgramPane::ModelParams);
+        let pane = self.panes.iter()
+            .map(|(p,s)|(*p,*s))
+            .find(|(_,state)|*state==ProgramPane::ModelParams);
         if let Some((pane, _)) = pane {
-            self.panes.close(pane);
+            *self.panes
+                .get_mut(pane)
+                .unwrap() = ProgramPane::ModelList;
+        }
+    }
+
+    fn open_entity_params(&mut self) {
+        let pane = self.panes.iter()
+            .map(|(p,s)|(*p,*s))
+            .find(|(_,state)|*state==ProgramPane::ModelList);
+        if let Some((pane, _)) = pane {
+            *self.panes
+                .get_mut(pane)
+                .unwrap() = ProgramPane::ModelParams;
         }
     }
 }
@@ -726,7 +739,7 @@ impl Default for MainProgram {
                 a: Box::new(pane_grid::Configuration::Pane(ProgramPane::Sheet)),
                 b: Box::new(pane_grid::Configuration::Split {
                     axis: pane_grid::Axis::Horizontal,
-                    ratio: 0.3,
+                    ratio: 0.45,
                     a: Box::new(pane_grid::Configuration::Pane(ProgramPane::SheetList)),
                     b: Box::new(pane_grid::Configuration::Pane(ProgramPane::ModelList)),
                 }),
