@@ -13,12 +13,28 @@ I use OpenSCAD to model my plywood parts and it apparently only ever exports lin
 I am supporting for now.
 
 
+## Dictionary of terms
+### Entity
+An entity is simply an instance of a model with a transform and scale applied. This is to reduce
+duplication of models.
+
+### Model
+A collection of lines that form a part with a single possibly convex outline and zero or more holes.
+
+### Sheet
+An area that represents some physical material where entities can be moved, rotated, and scaled.
+
+
 ## List of features
 - 🗹 DXF Loading
 - 🗹 Recognize lines from line segments
 - 🗹 Rotate parts if they are not in the XY plane
 
-- ☐ Text GUI
+- 🗹 Text GUI
+- 🗹 Adding sheets, deleting sheets, and changing the size of sheets
+- 🗹 Adding and deleting entities
+- 🗹 Editing the transform and scale of entities
+- 🗹 Loading and instantiating models that the user chooses
 
 - 🗹 Rendering of the build space
 - 🗹 Rendering of a sheet of material
@@ -29,7 +45,7 @@ I am supporting for now.
 
 - ☐ GCODE output of the nested program
 
-- ☐ Configurable "laser conditions" where the laser operates at different powers
+- ☐ Configurable "laser conditions" where the laser operates at different powers and speeds
 - ☐ Coloring of lines with different laser conditions
 
 - ☐ GCODE simulator with coloring
