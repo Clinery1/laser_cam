@@ -25,7 +25,7 @@ A collection of lines that form a part with a single possibly convex outline and
 An area that represents some physical material where entities can be moved, rotated, and scaled.
 
 
-## List of features
+## List of features (roadmap)
 - 🗹 DXF Loading
 - 🗹 Recognize lines from line segments
 - 🗹 Rotate parts if they are not in the XY plane
@@ -43,12 +43,14 @@ An area that represents some physical material where entities can be moved, rota
 
 - 🗹 Navigation for the line rendering (pan and zoom)
 
-- ☐ GCODE output of the nested program
+- 🗹 GCODE output of the nested program
 
 - ☐ Configurable "laser conditions" where the laser operates at different powers and speeds
 - ☐ Coloring of lines with different laser conditions
 
 - ☐ GCODE simulator with coloring
+
+- ☐ Detection of out-of-bounds entities using the outline and sheet border
 
 
 ## Screenshots

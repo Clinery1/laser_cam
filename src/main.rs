@@ -34,6 +34,7 @@ use model::*;
 
 mod model;
 mod sheet;
+mod gcode;
 
 
 pub type Point = ultraviolet::DVec2;
@@ -54,6 +55,8 @@ pub enum Message {
     DeleteSheet,
     ChangeSheetWidth(String),
     ChangeSheetHeight(String),
+    ChangeSheetFeed(String),
+    ChangeSheetPower(String),
 
     AddModel(ModelHandle),
 
@@ -63,6 +66,9 @@ pub enum Message {
 
     OpenFilePicker,
     LoadModel(Option<Vec<FileHandle>>),
+
+    OpenGcodeSaveDialog,
+    SaveGcode(Option<FileHandle>),
 
     ModelParamsX(String),
     ModelParamsY(String),
@@ -99,6 +105,9 @@ impl Display for ModelPaneState {
 #[derive(Clone, PartialEq)]
 pub struct SheetIndex {
     pub name: String,
+    pub feedrate: u16,
+    pub laser_power: u16,
+    pub gcode: Option<String>,
     pub index: usize,
 }
 impl Display for SheetIndex {
@@ -121,7 +130,7 @@ pub struct MainProgram {
     models: ModelStore,
     active_sheet: usize,
     sheets: Vec<Sheet>,
-    names: Vec<SheetIndex>,
+    sheet_settings: Vec<SheetIndex>,
     model_pane_state: ModelPaneState,
     entity_params: Option<EntityParams>,
     sheet_size: [String; 2],
@@ -211,8 +220,8 @@ impl MainProgram {
             row![
                 // sheet selector
                 widget::pick_list(
-                    self.names.as_slice(),
-                    Some(&self.names[self.active_sheet]),
+                    self.sheet_settings.as_slice(),
+                    Some(&self.sheet_settings[self.active_sheet]),
                     |named_sheet|Message::SelectSheet(named_sheet.index),
                 ),
 
@@ -232,7 +241,7 @@ impl MainProgram {
                 "Rename: ",
                 widget::text_input(
                     "Sheet name",
-                    self.names[self.active_sheet].name.as_str(),
+                    self.sheet_settings[self.active_sheet].name.as_str(),
                 )
                     .on_input(|s|Message::RenameSheet(s)),
             ],
@@ -245,6 +254,7 @@ impl MainProgram {
                 )
                     .on_input(Message::ChangeSheetWidth),
             ],
+
             row![
                 "Height: ",
                 widget::text_input(
@@ -253,6 +263,27 @@ impl MainProgram {
                 )
                     .on_input(Message::ChangeSheetHeight),
             ],
+
+            row![
+                "Feed: ",
+                widget::text_input(
+                    "Feed",
+                    &self.sheet_settings[self.active_sheet].feedrate.to_string(),
+                )
+                    .on_input(Message::ChangeSheetFeed),
+            ],
+
+            row![
+                "Laser Power: ",
+                widget::text_input(
+                    "Power",
+                    &self.sheet_settings[self.active_sheet].laser_power.to_string(),
+                )
+                    .on_input(Message::ChangeSheetPower),
+            ],
+
+            widget::button("Save GCODE")
+                .on_press(Message::OpenGcodeSaveDialog)
         ]
             .clip(true)
             .padding(5.0)
@@ -432,11 +463,14 @@ impl MainProgram {
                     .main_update(msg)
                     .map(|m|Message::Sheet(m));
             },
-            Message::RenameSheet(name)=>self.names[self.active_sheet].name = name,
+            Message::RenameSheet(name)=>self.sheet_settings[self.active_sheet].name = name,
             Message::NewSheet=>{
                 self.active_sheet = self.sheets.len();
-                self.names.push(SheetIndex {
+                self.sheet_settings.push(SheetIndex {
                     name: "New Sheet".into(),
+                    feedrate: 1000,
+                    laser_power: 100,
+                    gcode: None,
                     index: self.sheets.len(),
                 });
                 self.sheets.push(Sheet::new(self.models.clone()));
@@ -450,16 +484,19 @@ impl MainProgram {
                 // ensure there is at least 1 sheet so we don't have errors
                 if self.sheets.len() == 1 {
                     self.sheets.clear();
-                    self.names.clear();
+                    self.sheet_settings.clear();
 
-                    self.names.push(SheetIndex {
+                    self.sheet_settings.push(SheetIndex {
                         name: "New Sheet".into(),
+                        feedrate: 1000,
+                        laser_power: 100,
+                        gcode: None,
                         index: self.sheets.len(),
                     });
                     self.sheets.push(Sheet::new(self.models.clone()));
                 } else {
                     self.sheets.remove(self.active_sheet);
-                    self.names.remove(self.active_sheet);
+                    self.sheet_settings.remove(self.active_sheet);
                     self.active_sheet = 0;
                 }
 
@@ -616,6 +653,51 @@ impl MainProgram {
                     self.sheets[self.active_sheet].recalc_paths();
                 }
             },
+            Message::ChangeSheetFeed(val)=>{
+                if let Some(n) = parse_num(&val) {
+                    self.sheet_settings[self.active_sheet]
+                        .feedrate = n;
+                }
+            },
+            Message::ChangeSheetPower(val)=>{
+                if let Some(n) = parse_num(&val) {
+                    self.sheet_settings[self.active_sheet]
+                        .laser_power = n;
+                }
+            },
+            Message::SaveGcode(opt_file)=>{
+                if let Some(file) = opt_file {
+                    let mut path = file.path().to_path_buf();
+
+                    // ensure there is a file extension
+                    if path.extension().is_none() {
+                        path.set_extension(".gcode");
+                    }
+
+                    let gcode = self.sheet_settings[self.active_sheet]
+                        .gcode
+                        .take()
+                        .unwrap_or(String::new());
+
+                    match std::fs::write(path, gcode) {
+                        Err(e)=>eprintln!("Error saving GCODE file: {e}"),
+                        _=>eprintln!("Saved GCODE file"),
+                    }
+                }
+            },
+            Message::OpenGcodeSaveDialog=>{
+                let settings = &mut self.sheet_settings[self.active_sheet];
+                let gcode = self.sheets[self.active_sheet]
+                    .generate_gcode(settings.laser_power, settings.feedrate, settings.name.as_str());
+                settings.gcode = Some(gcode);
+
+                let future = AsyncFileDialog::new()
+                    .add_filter("GCODE Files", &["gcode", "nc"])
+                    .set_title("Save GCODE file")
+                    .set_file_name(format!("{}.gcode", self.sheet_settings[self.active_sheet].name))
+                    .save_file();
+                return Task::perform(future, Message::SaveGcode);
+            },
         }
 
         return Task::none();
@@ -652,8 +734,11 @@ impl Default for MainProgram {
             models,
             active_sheet: 0,
             sheets: vec![sheet],
-            names: vec![SheetIndex {
+            sheet_settings: vec![SheetIndex {
                 name: "New Sheet".into(),
+                feedrate: 1000,
+                laser_power: 100,
+                gcode: None,
                 index: 0,
             }],
             model_pane_state: ModelPaneState::AllModels,
@@ -687,6 +772,15 @@ fn parse_float(s: &str)->Option<f64> {
     }
 
     s.parse().ok()
+}
+
+fn parse_num(s: &str)->Option<u16> {
+    if s.len() == 0 {
+        return Some(0);
+    }
+
+    let num: Option<u32> = s.parse().ok();
+    num.map(|n|if n > u16::MAX as u32 {u16::MAX} else {n as u16})
 }
 
 fn danger_button(theme: &Theme, status: ButtonStatus)->widget::button::Style {

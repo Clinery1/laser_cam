@@ -38,6 +38,7 @@ use std::{
 };
 use crate::{
     sheet::EntityTransform,
+    gcode::*,
     p_conv,
     Point,
 };
@@ -155,6 +156,67 @@ impl Model {
         }
     }
 
+    /// Generate the gcode for this model with the given transform, laser power, and feedrate.
+    ///
+    /// The generated code includes laser on const, laser off, and proper feeds and speeds for
+    /// safety. After each line we set laser power to 0 and rapid move to the next line. After all
+    /// lines are done, we turn the laser off.
+    pub fn generate_gcode(&self, mt: &EntityTransform, builder: &mut GcodeBuilder, laser_power: u16, feedrate: u16) {
+        builder.comment_block(format!("Start model: {}", self.name));
+
+
+        builder.cutting_motion()
+            .feed(feedrate)
+            .laser_power(0)
+            .eob();
+
+        builder.laser_on_const().eob();
+
+        for (i, line) in self.lines.iter().enumerate() {
+            builder.comment_block(format!("- Start line {i}"));
+
+            let (Line::Closed(points)|Line::Open(points)) = line;
+
+            // create an iterator of the points and transform them
+            let mut points_iter = points.iter()
+                .map(|p|transform_point(*p, mt));
+
+            let start = points_iter.next().unwrap();
+            builder.rapid_motion()
+                .x(start.x)
+                .y(start.y)
+                .eob();
+
+            for point in points_iter {
+                builder.cutting_motion()
+                    .x(point.x)
+                    .y(point.y)
+                    .laser_power(laser_power)
+                    .eob();
+            }
+
+            // close the line if it needs to be
+            match line {
+                Line::Closed(_)=>{
+                    builder.cutting_motion()
+                        .x(start.x)
+                        .y(start.y)
+                        .laser_power(laser_power)
+                        .eob();
+                },
+                _=>{},
+            }
+
+            builder.cutting_motion()
+                .laser_power(0)
+                .eob();
+        }
+
+        builder.laser_off().eob();
+
+        builder.comment_block(format!("End model: {}", self.name));
+    }
+
     /// Get the center of the model based on extents.
     /// NOTE: This IS NOT center-of-mass.
     #[allow(unused)]
@@ -190,9 +252,8 @@ impl Model {
             let mut builder = PathBuilder::new();
             let mut points_iter = points.iter()
                 .copied()
-                .map(|mut p|{
-                    if mt.flip {p.y *= -1.0}
-                    p_conv(mt.transform.transform_vec(p))
+                .map(|p|{
+                    p_conv(transform_point(p, &mt))
                 });
 
             builder.move_to(points_iter.next().unwrap());
@@ -211,16 +272,8 @@ impl Model {
         }
 
         // build the outline
-        let mut outline_min = self.min;
-        let mut outline_max = self.max;
-
-        if mt.flip {
-            outline_max.y *= -1.0;
-            outline_min.y *= -1.0;
-        }
-
-        let outline_min = mt.transform.transform_vec(outline_min);
-        let outline_max = mt.transform.transform_vec(outline_max);
+        let outline_min = transform_point(self.min, &mt);
+        let outline_max = transform_point(self.max, &mt);
 
         // Build the outline as a rectangle based on the AABB
         let mut builder = PathBuilder::new();
@@ -381,7 +434,7 @@ impl<'a> Iterator for ModelIter<'a> {
 
 fn load_model<P: AsRef<StdPath>>(path: P)->Result<Model> {
     let path = path.as_ref();
-    let name = path.file_name()
+    let name = path.file_stem()
         .expect("File does not have a name")
         .to_str()
         .expect("File name is not valid UTF-8");
@@ -468,4 +521,12 @@ fn load_model<P: AsRef<StdPath>>(path: P)->Result<Model> {
     }
 
     return Ok(Model::new(lines, name.into()));
+}
+
+fn transform_point(mut point: Point, mt: &EntityTransform)->Point {
+    if mt.flip {
+        point.y *= -1.0;
+    }
+
+    mt.transform.transform_vec(point)
 }
