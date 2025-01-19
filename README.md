@@ -14,17 +14,18 @@ I am supporting for now.
 
 
 ## List of features
-- ☐ DXF Loading
-- ☐ Recognize lines from line segments
-- ☐ Rotate parts if they are not in the XY plane
+- 🗹 DXF Loading
+- 🗹 Recognize lines from line segments
+- 🗹 Rotate parts if they are not in the XY plane
 
 - ☐ Text GUI
 
-- ☐ Rendering of the build space
-- ☐ Rendering of a sheet of material with coloring
-- ☐ Line rendering for the model
+- 🗹 Rendering of the build space
+- 🗹 Rendering of a sheet of material
+- ⁇ (Optional) add color to the sheet material
+- 🗹 Line rendering for the model
 
-- ☐ Navigation for the line rendering
+- 🗹 Navigation for the line rendering (pan and zoom)
 
 - ☐ GCODE output of the nested program
 
