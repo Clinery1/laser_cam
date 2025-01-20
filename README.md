@@ -48,12 +48,16 @@ An area that represents some physical material where entities can be moved, rota
 
 - 🗹 GCODE output of the nested program
 
-- ☐ Configurable "laser conditions" where the laser operates at different powers and speeds
+- ☐ Configurable "laser conditions" where the laser operates at different powers, speeds, and passes
+- ☐ Per-entity laser conditions
 - ☐ Coloring of lines with different laser conditions
 
 - ☐ GCODE simulator with coloring
 
 - ☐ Detection of out-of-bounds entities using the outline and sheet border
+
+- ☐ Saving and loading nested sheets
+- ☐ 
 
 
 ## DISCLAIMER

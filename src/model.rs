@@ -37,7 +37,8 @@ use std::{
     result::Result as StdResult,
 };
 use crate::{
-    sheet::EntityTransform,
+    sheet::EntityState,
+    laser::Condition,
     gcode::*,
     p_conv,
     Point,
@@ -161,19 +162,48 @@ impl Model {
     /// The generated code includes laser on const, laser off, and proper feeds and speeds for
     /// safety. After each line we set laser power to 0 and rapid move to the next line. After all
     /// lines are done, we turn the laser off.
-    pub fn generate_gcode(&self, mt: &EntityTransform, builder: &mut GcodeBuilder, laser_power: u16, feedrate: u16) {
-        builder.comment_block(format!("Start model: {}", self.name));
-
-
-        builder.cutting_motion()
-            .feed(feedrate)
-            .laser_power(0)
-            .eob();
+    pub fn generate_gcode(&self, mt: &EntityState, builder: &mut GcodeBuilder, laser_condition: &Condition) {
+        builder.comment_block(format!(
+            "Start model `{}` with laser condition `{}` and {} sequence items",
+            self.name,
+            laser_condition.name,
+            laser_condition.sequence.len(),
+        ));
 
         builder.laser_on_const().eob();
 
+        for (i, seq) in laser_condition.sequence.iter().enumerate() {
+            let passes = if seq.passes > 1 {"passes"} else {"pass"};
+            builder.comment_block(format!(
+                "- Begin sequence {} with {} {passes} at {}mm/min and {}% power",
+                i + 1,
+                seq.passes,
+                seq.feed,
+                (seq.power as f32) / 10.0,
+            ));
+
+            for pass in 0..seq.passes {
+                builder.comment_block(format!("-- Begin pass {}", pass + 1));
+
+                self.generate_gcode_lines(builder, mt, seq.power, seq.feed);
+            }
+        }
+
+        builder.laser_off().eob();
+
+        builder.comment_block(format!("End model `{}`", self.name));
+    }
+
+    fn generate_gcode_lines(&self, builder: &mut GcodeBuilder, mt: &EntityState, laser_power: u16, feedrate: u16) {
         for (i, line) in self.lines.iter().enumerate() {
-            builder.comment_block(format!("- Start line {i}"));
+            if i == 0 {
+                builder.cutting_motion()
+                    .feed(feedrate)
+                    .laser_power(0)
+                    .eob();
+            }
+
+            builder.comment_block(format!("--- Start line {i}"));
 
             let (Line::Closed(points)|Line::Open(points)) = line;
 
@@ -211,10 +241,6 @@ impl Model {
                 .laser_power(0)
                 .eob();
         }
-
-        builder.laser_off().eob();
-
-        builder.comment_block(format!("End model: {}", self.name));
     }
 
     /// Get the center of the model based on extents.
@@ -242,7 +268,7 @@ impl Model {
     /// Build the [`iced::Path`]s from this model and a transform.
     /// TODO(optimization): Reuse built paths and transform them instead of creating new ones every
     /// time.
-    pub fn paths(&self, mt: EntityTransform)->ModelPaths {
+    pub fn paths(&self, mt: EntityState)->ModelPaths {
         let mut paths = Vec::with_capacity(self.lines.len());
 
         let mut min = Point::new(999999999.0,999999999.0);
@@ -533,7 +559,7 @@ fn load_model<P: AsRef<StdPath>>(path: P)->Result<Model> {
     return Ok(Model::new(lines, name.into()));
 }
 
-fn transform_point(mut point: Point, mt: &EntityTransform)->Point {
+fn transform_point(mut point: Point, mt: &EntityState)->Point {
     if mt.flip {
         point.y *= -1.0;
     }

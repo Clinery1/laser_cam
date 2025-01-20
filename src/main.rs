@@ -12,12 +12,17 @@ use iced::{
         text,
         self,
     },
+    event::{
+        Event,
+        self,
+    },
     Background,
     Border,
     Length,
     Element,
     Theme,
     Task,
+    window,
 };
 use rfd::{
     AsyncFileDialog,
@@ -30,11 +35,17 @@ use std::fmt::{
 };
 use sheet::*;
 use model::*;
+use laser::{
+    ConditionEditor,
+    Message as ConditionMessage,
+    ConditionId,
+};
 
 
 mod model;
 mod sheet;
 mod gcode;
+mod laser;
 
 
 pub type Point = ultraviolet::DVec2;
@@ -48,6 +59,8 @@ pub type Translation = ultraviolet::DVec2;
 #[derive(Debug, Clone)]
 pub enum Message {
     Sheet(SheetMessage),
+    Condition(ConditionMessage),
+    Iced(Event),
 
     RenameSheet(String),
     SelectSheet(usize),
@@ -55,8 +68,6 @@ pub enum Message {
     DeleteSheet,
     ChangeSheetWidth(String),
     ChangeSheetHeight(String),
-    ChangeSheetFeed(String),
-    ChangeSheetPower(String),
 
     AddModel(ModelHandle),
 
@@ -70,13 +81,16 @@ pub enum Message {
     OpenGcodeSaveDialog,
     SaveGcode(Option<FileHandle>),
 
-    ModelParamsX(String),
-    ModelParamsY(String),
-    ModelParamsAngle(f64),
-    ModelParamsAngleString(String),
-    ModelParamsScale(String),
-    ModelParamsFlip(bool),
+    EntityParamsX(String),
+    EntityParamsY(String),
+    EntityParamsAngle(f64),
+    EntityParamsAngleString(String),
+    EntityParamsScale(String),
+    EntityParamsFlip(bool),
+    EntityParamsCondition(ConditionId),
     DeleteEntity,
+
+    ToggleConditionEditor,
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -84,7 +98,8 @@ pub enum ProgramPane {
     Sheet,
     SheetList,
     ModelList,
-    ModelParams,
+    EntityParams,
+    ConditionEditor,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -105,8 +120,6 @@ impl Display for ModelPaneState {
 #[derive(Clone, PartialEq)]
 pub struct SheetIndex {
     pub name: String,
-    pub feedrate: u16,
-    pub laser_power: u16,
     pub gcode: Option<String>,
     pub index: usize,
 }
@@ -123,6 +136,7 @@ struct EntityParams {
     rotation: f64,
     scale: String,
     flip: bool,
+    laser_condition: ConditionId,
 }
 
 pub struct MainProgram {
@@ -134,6 +148,7 @@ pub struct MainProgram {
     model_pane_state: ModelPaneState,
     entity_params: Option<EntityParams>,
     sheet_size: [String; 2],
+    conditions: ConditionEditor,
 }
 impl MainProgram {
     pub fn view(&self)->Element<Message> {
@@ -141,6 +156,17 @@ impl MainProgram {
             &self.panes,
             |_pane, state, _is_maximized|{
                 match state {
+                    ProgramPane::ConditionEditor=>pane_grid::Content::new(self.conditions.view().map(Message::Condition))
+                        .style(|theme|{
+                            Style {
+                                border: Border {
+                                    color: theme.palette().primary,
+                                    width: 1.0,
+                                    ..Border::default()
+                                },
+                                ..Style::default()
+                            }
+                        }),
                     ProgramPane::Sheet=>pane_grid::Content::new(self.sheet_view())
                         .style(|theme|{
                             Style {
@@ -182,7 +208,7 @@ impl MainProgram {
                             pane_grid::TitleBar::new(widget::center(text!("Models")).height(Length::Shrink))
                                 .padding(5.0)
                         ),
-                    ProgramPane::ModelParams=>pane_grid::Content::new(self.entity_params_view())
+                    ProgramPane::EntityParams=>pane_grid::Content::new(self.entity_params_view())
                         .style(|theme|{
                             Style {
                                 border: Border {
@@ -218,19 +244,22 @@ impl MainProgram {
     fn sheet_list_view(&self)->Element<Message> {
         widget::scrollable(
             column![
-                row![
-                    // sheet selector
-                    widget::pick_list(
-                        self.sheet_settings.as_slice(),
-                        Some(&self.sheet_settings[self.active_sheet]),
-                        |named_sheet|Message::SelectSheet(named_sheet.index),
-                    ),
+                // sheet selector
+                widget::pick_list(
+                    self.sheet_settings.as_slice(),
+                    Some(&self.sheet_settings[self.active_sheet]),
+                    |named_sheet|Message::SelectSheet(named_sheet.index),
+                ),
 
-                    widget::button("New sheet")
-                        .on_press(Message::NewSheet),
-                ],
+                widget::button("New sheet")
+                    .on_press(Message::NewSheet),
 
                 widget::Space::with_height(15.0),
+
+                widget::button("Laser condition editor")
+                    .on_press(Message::ToggleConditionEditor),
+
+                widget::Space::with_height(5.0),
 
                 widget::button("Delete sheet")
                     .style(danger_button)
@@ -263,24 +292,6 @@ impl MainProgram {
                         &self.sheet_size[1],
                     )
                         .on_input(Message::ChangeSheetHeight),
-                ],
-
-                row![
-                    "Feed: ",
-                    widget::text_input(
-                        "Feed",
-                        &self.sheet_settings[self.active_sheet].feedrate.to_string(),
-                    )
-                        .on_input(Message::ChangeSheetFeed),
-                ],
-
-                row![
-                    "Laser Power: ",
-                    widget::text_input(
-                        "Power",
-                        &self.sheet_settings[self.active_sheet].laser_power.to_string(),
-                    )
-                        .on_input(Message::ChangeSheetPower),
                 ],
 
                 widget::button("Save GCODE")
@@ -349,6 +360,15 @@ impl MainProgram {
     fn entity_params_view(&self)->Element<Message> {
         let params = self.entity_params.as_ref().unwrap();
 
+        let store = self.conditions
+            .get_store();
+        let store = store.borrow();
+        let conditions = store.iter()
+            .map(|c|c.display())
+            .collect::<Vec<_>>();
+        let current_condition = store.get(params.laser_condition).display();
+        drop(store);
+
         widget::scrollable(
             column![
                 row![
@@ -357,7 +377,7 @@ impl MainProgram {
                         "X",
                         &params.x,
                     )
-                        .on_input(Message::ModelParamsX),
+                        .on_input(Message::EntityParamsX),
                 ],
 
                 row![
@@ -366,7 +386,7 @@ impl MainProgram {
                         "Y",
                         &params.y,
                     )
-                        .on_input(Message::ModelParamsY),
+                        .on_input(Message::EntityParamsY),
                 ],
 
                 row![
@@ -375,13 +395,13 @@ impl MainProgram {
                         widget::slider(
                             0.0..=360.0,
                             params.rotation,
-                            Message::ModelParamsAngle,
+                            Message::EntityParamsAngle,
                         ),
                         widget::TextInput::new(
                             "Angle",
                             format!("{:.6}", params.rotation).as_str(),
                         )
-                            .on_input(Message::ModelParamsAngleString),
+                            .on_input(Message::EntityParamsAngleString),
                     ],
                 ],
 
@@ -391,7 +411,7 @@ impl MainProgram {
                         "Scale",
                         &params.scale,
                     )
-                        .on_input(Message::ModelParamsScale),
+                        .on_input(Message::EntityParamsScale),
                 ],
 
                 row![
@@ -399,8 +419,14 @@ impl MainProgram {
                         "Flip: ",
                         params.flip,
                     )
-                        .on_toggle(Message::ModelParamsFlip),
+                        .on_toggle(Message::EntityParamsFlip),
                 ],
+
+                widget::pick_list(
+                    conditions,
+                    Some(current_condition),
+                    |c|Message::EntityParamsCondition(c.id),
+                ),
 
                 widget::Space::with_height(25.0),
 
@@ -432,6 +458,7 @@ impl MainProgram {
                             rotation: angle,
                             scale: format!("{:.6}", mt.transform.scale),
                             flip: mt.flip,
+                            laser_condition: mt.laser_condition,
                         });
 
                         self.close_entity_params();
@@ -456,17 +483,28 @@ impl MainProgram {
                     .main_update(msg)
                     .map(|m|Message::Sheet(m));
             },
+            Message::Condition(msg)=>{
+                match msg {
+                    ConditionMessage::CloseEditor=>{
+                        self.close_condition_editor();
+                    },
+                    ConditionMessage::RecalcSheet=>{
+                        self.sheets[self.active_sheet].recalc_paths();
+                    },
+                    _=>{},
+                }
+
+                return self.conditions.update(msg).map(Message::Condition);
+            },
             Message::RenameSheet(name)=>self.sheet_settings[self.active_sheet].name = name,
             Message::NewSheet=>{
                 self.active_sheet = self.sheets.len();
                 self.sheet_settings.push(SheetIndex {
                     name: "New Sheet".into(),
-                    feedrate: 1000,
-                    laser_power: 100,
                     gcode: None,
                     index: self.sheets.len(),
                 });
-                self.sheets.push(Sheet::new(self.models.clone()));
+                self.sheets.push(Sheet::new(self.models.clone(), self.conditions.get_store()));
 
                 self.sheet_size = [
                     format!("{:.6}", self.sheets[self.active_sheet].sheet_size.x),
@@ -481,12 +519,10 @@ impl MainProgram {
 
                     self.sheet_settings.push(SheetIndex {
                         name: "New Sheet".into(),
-                        feedrate: 1000,
-                        laser_power: 100,
                         gcode: None,
                         index: self.sheets.len(),
                     });
-                    self.sheets.push(Sheet::new(self.models.clone()));
+                    self.sheets.push(Sheet::new(self.models.clone(), self.conditions.get_store()));
                 } else {
                     self.sheets.remove(self.active_sheet);
                     self.sheet_settings.remove(self.active_sheet);
@@ -508,8 +544,9 @@ impl MainProgram {
             },
             Message::ResizePane(event)=>self.panes.resize(event.split, event.ratio),
             Message::AddModel(handle)=>{
+                
                 self.sheets[self.active_sheet]
-                    .add_model_from_handle(handle, 1);
+                    .add_model_from_handle(handle, 1, self.conditions.default_condition());
             },
             Message::ModelPaneState(state)=>self.model_pane_state = state,
             Message::OpenFilePicker=>{
@@ -528,10 +565,10 @@ impl MainProgram {
 
                     let handle = self.models.add(model);
                     self.sheets[self.active_sheet]
-                        .add_model_from_handle(handle, 1);
+                        .add_model_from_handle(handle, 1, self.conditions.default_condition());
                 }
             },
-            Message::ModelParamsX(val)=>{
+            Message::EntityParamsX(val)=>{
                 if let Some(f) = parse_float(&val) {
                     let Some(params) = self.entity_params
                         .as_mut() else {return Task::none()};
@@ -546,7 +583,7 @@ impl MainProgram {
                     self.sheets[self.active_sheet].recalc_paths();
                 }
             },
-            Message::ModelParamsY(val)=>{
+            Message::EntityParamsY(val)=>{
                 if let Some(f) = parse_float(&val) {
                     let Some(params) = self.entity_params
                         .as_mut() else {return Task::none()};
@@ -561,7 +598,7 @@ impl MainProgram {
                     self.sheets[self.active_sheet].recalc_paths();
                 }
             },
-            Message::ModelParamsAngle(val)=>{
+            Message::EntityParamsAngle(val)=>{
                 let Some(params) = self.entity_params
                     .as_mut() else {return Task::none()};
 
@@ -574,7 +611,7 @@ impl MainProgram {
 
                 self.sheets[self.active_sheet].recalc_paths();
             },
-            Message::ModelParamsAngleString(val)=>{
+            Message::EntityParamsAngleString(val)=>{
                 if let Some(f) = parse_float(&val) {
                     let Some(params) = self.entity_params
                         .as_mut() else {return Task::none()};
@@ -589,7 +626,7 @@ impl MainProgram {
                     self.sheets[self.active_sheet].recalc_paths();
                 }
             },
-            Message::ModelParamsScale(val)=>{
+            Message::EntityParamsScale(val)=>{
                 if let Some(f) = parse_float(&val) {
                     let Some(params) = self.entity_params
                         .as_mut() else {return Task::none()};
@@ -604,7 +641,7 @@ impl MainProgram {
                     self.sheets[self.active_sheet].recalc_paths();
                 }
             },
-            Message::ModelParamsFlip(val)=>{
+            Message::EntityParamsFlip(val)=>{
                 let Some(params) = self.entity_params
                     .as_mut() else {return Task::none()};
 
@@ -613,6 +650,18 @@ impl MainProgram {
                     .entities.get_mut(&params.id)
                     .unwrap().1
                     .flip = val;
+
+                self.sheets[self.active_sheet].recalc_paths();
+            },
+            Message::EntityParamsCondition(id)=>{
+                let Some(params) = self.entity_params
+                    .as_mut() else {return Task::none()};
+
+                params.laser_condition = id;
+                self.sheets[self.active_sheet]
+                    .entities.get_mut(&params.id)
+                    .unwrap().1
+                    .laser_condition = id;
 
                 self.sheets[self.active_sheet].recalc_paths();
             },
@@ -646,18 +695,6 @@ impl MainProgram {
                     self.sheets[self.active_sheet].recalc_paths();
                 }
             },
-            Message::ChangeSheetFeed(val)=>{
-                if let Some(n) = parse_num(&val) {
-                    self.sheet_settings[self.active_sheet]
-                        .feedrate = n;
-                }
-            },
-            Message::ChangeSheetPower(val)=>{
-                if let Some(n) = parse_num(&val) {
-                    self.sheet_settings[self.active_sheet]
-                        .laser_power = n;
-                }
-            },
             Message::SaveGcode(opt_file)=>{
                 if let Some(file) = opt_file {
                     let mut path = file.path().to_path_buf();
@@ -683,7 +720,7 @@ impl MainProgram {
 
                 let settings = &mut self.sheet_settings[self.active_sheet];
                 let gcode = self.sheets[self.active_sheet]
-                    .generate_gcode(settings.laser_power, settings.feedrate, settings.name.as_str());
+                    .generate_gcode(settings.name.as_str());
                 settings.gcode = Some(gcode);
 
                 let elapsed = start.elapsed();
@@ -696,15 +733,54 @@ impl MainProgram {
                     .save_file();
                 return Task::perform(future, Message::SaveGcode);
             },
+            Message::ToggleConditionEditor=>{
+                if !self.open_condition_editor() {
+                    self.close_condition_editor();
+                }
+            },
+            Message::Iced(event)=>{
+                if let Event::Window(window::Event::CloseRequested) = event {
+                    self.conditions.save();
+                    return window::get_latest().and_then(window::close);
+                }
+            }
         }
 
         return Task::none();
     }
 
+    fn open_condition_editor(&mut self)->bool {
+        let pane = self.panes.iter()
+            .map(|(p,s)|(*p,*s))
+            .find(|(_,state)|*state==ProgramPane::Sheet);
+        if let Some((pane, _)) = pane {
+            *self.panes
+                .get_mut(pane)
+                .unwrap() = ProgramPane::ConditionEditor;
+            return true;
+        }
+
+        return false;
+    }
+
+    fn close_condition_editor(&mut self)->bool {
+        let pane = self.panes.iter()
+            .map(|(p,s)|(*p,*s))
+            .find(|(_,state)|*state==ProgramPane::ConditionEditor);
+        if let Some((pane, _)) = pane {
+            *self.panes
+                .get_mut(pane)
+                .unwrap() = ProgramPane::Sheet;
+            return true;
+        }
+
+        return false;
+    }
+
     fn close_entity_params(&mut self) {
         let pane = self.panes.iter()
             .map(|(p,s)|(*p,*s))
-            .find(|(_,state)|*state==ProgramPane::ModelParams);
+            .find(|(_,state)|*state==ProgramPane::EntityParams);
         if let Some((pane, _)) = pane {
             *self.panes
                 .get_mut(pane)
@@ -719,29 +795,34 @@ impl MainProgram {
         if let Some((pane, _)) = pane {
             *self.panes
                 .get_mut(pane)
-                .unwrap() = ProgramPane::ModelParams;
+                .unwrap() = ProgramPane::EntityParams;
         }
     }
 }
 impl Default for MainProgram {
     fn default()->Self {
+        use pane_grid::{
+            Configuration,
+            Axis,
+        };
+        let conditions = ConditionEditor::load();
         let models = ModelStore::new();
-        let sheet = Sheet::new(models.clone());
+        let sheet = Sheet::new(models.clone(), conditions.get_store());
 
         MainProgram {
             sheet_size: [
                 format!("{:.6}", sheet.sheet_size.x),
                 format!("{:.6}", sheet.sheet_size.y),
             ],
-            panes: PaneState::with_configuration(pane_grid::Configuration::Split {
-                axis: pane_grid::Axis::Vertical,
+            panes: PaneState::with_configuration(Configuration::Split {
+                axis: Axis::Vertical,
                 ratio: 0.8,
-                a: Box::new(pane_grid::Configuration::Pane(ProgramPane::Sheet)),
-                b: Box::new(pane_grid::Configuration::Split {
-                    axis: pane_grid::Axis::Horizontal,
+                a: Box::new(Configuration::Pane(ProgramPane::Sheet)),
+                b: Box::new(Configuration::Split {
+                    axis: Axis::Horizontal,
                     ratio: 0.45,
-                    a: Box::new(pane_grid::Configuration::Pane(ProgramPane::SheetList)),
-                    b: Box::new(pane_grid::Configuration::Pane(ProgramPane::ModelList)),
+                    a: Box::new(Configuration::Pane(ProgramPane::SheetList)),
+                    b: Box::new(Configuration::Pane(ProgramPane::ModelList)),
                 }),
             }),
             models,
@@ -749,13 +830,12 @@ impl Default for MainProgram {
             sheets: vec![sheet],
             sheet_settings: vec![SheetIndex {
                 name: "New Sheet".into(),
-                feedrate: 1000,
-                laser_power: 100,
                 gcode: None,
                 index: 0,
             }],
             model_pane_state: ModelPaneState::AllModels,
             entity_params: None,
+            conditions,
         }
     }
 }
@@ -767,6 +847,8 @@ fn main()->iced::Result {
         MainProgram::update,
         MainProgram::view,
     )
+        .subscription(|_|event::listen().map(Message::Iced))
+        .exit_on_close_request(false)
         .centered()
         .theme(|_|Theme::Dark)
         .run()
@@ -779,7 +861,7 @@ pub fn p_conv(uv: Point)->iced::Point {
     }
 }
 
-fn parse_float(s: &str)->Option<f64> {
+pub fn parse_float(s: &str)->Option<f64> {
     if s.len() == 0 {
         return Some(0.0);
     }
@@ -787,7 +869,7 @@ fn parse_float(s: &str)->Option<f64> {
     s.parse().ok()
 }
 
-fn parse_num(s: &str)->Option<u16> {
+pub fn parse_u16(s: &str)->Option<u16> {
     if s.len() == 0 {
         return Some(0);
     }
@@ -796,7 +878,7 @@ fn parse_num(s: &str)->Option<u16> {
     num.map(|n|if n > u16::MAX as u32 {u16::MAX} else {n as u16})
 }
 
-fn danger_button(theme: &Theme, status: ButtonStatus)->widget::button::Style {
+pub fn danger_button(theme: &Theme, status: ButtonStatus)->widget::button::Style {
     let palette = theme.extended_palette();
     let danger = palette.danger;
     match status {
