@@ -1,6 +1,6 @@
 [package]
 name = "laser_cam"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 repository = "https://github.com/Clinery1/laser_cam"
 license = "MIT"
@@ -12,8 +12,9 @@ anyhow = "1.0.95"
 directories = "6.0.0"
 dxf = "0.6.0"
 geo = "0.29.3"
-iced = { version = "0.13.1", features = ["canvas"] }
+iced = { version = "0.13.1", features = ["advanced", "canvas", "multi-window"] }
 iced_graphics = { version = "0.13.0", features = ["geometry"] }
+indexmap = { version = "2.7.1", features = ["serde"] }
 rfd = "0.15.2"
 ron = "0.8.1"
 serde = { version = "1.0.217", features = ["derive"] }

@@ -4,7 +4,7 @@ cutter. It is designed to be as simple as possible and somewhat mimic the Amada 
 at work.
 
 
-![Main UI with sheet view](main_screenshot.png)
+![Main UI with sheet view](sample_nest.png)
 
 
 ## DXF file caveats
@@ -48,6 +48,8 @@ An area that represents some physical material where entities can be moved, rota
 
 - 🗹 GCODE output of the nested program
 
+- ☐ Rectangle selection thing
+
 - ☐ Configurable "laser conditions" where the laser operates at different powers, speeds, and passes
 - ☐ Per-entity laser conditions
 - ☐ Coloring of lines with different laser conditions
@@ -57,12 +59,14 @@ An area that represents some physical material where entities can be moved, rota
 - ☐ Detection of out-of-bounds entities using the outline and sheet border
 
 - ☐ Saving and loading nested sheets
-- ☐ 
 
 
 ## Screenshots
 The laser condition editor:
 ![Laser condition editor view](laser_condition_editor.png)
+
+Sheet editor:
+![Sheet editor view](sheet_editor.png)
 
 ## DISCLAIMER
 This is (at the time of writing) UNTESTED software. The GCODE generated may be wrong, it may be

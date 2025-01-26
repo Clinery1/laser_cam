@@ -3,10 +3,13 @@ use dxf::{
     Drawing,
 };
 use geo::{
+    MultiPolygon,
     Coord,
     LineString,
     Polygon,
     Contains,
+    Area,
+    ConvexHull,
 };
 use iced::widget::canvas::path::{
     Builder as PathBuilder,
@@ -30,6 +33,7 @@ use std::{
         RefCell,
         Ref,
     },
+    cmp::PartialOrd,
     ops::Deref,
     rc::Rc,
     sync::Arc,
@@ -37,11 +41,15 @@ use std::{
     result::Result as StdResult,
 };
 use crate::{
+    laser::{
+        Condition,
+        SequenceItem as Seq,
+    },
     sheet::EntityState,
-    laser::Condition,
+    utils::*,
     gcode::*,
-    p_conv,
     Point,
+    Rotation,
 };
 
 
@@ -68,42 +76,139 @@ impl Display for ModelLoadError {
     }
 }
 
-/// A line consisting of a list of points.
+
+/// A closed shape with one polygon or more polygons that may have holes.
 #[derive(Debug, Clone, PartialEq)]
-enum Line {
-    /// The list of points is assumed to be closed, and the last item IS NOT the same as the first.
-    /// There is an implied line from the last point to the first when drawing.
-    Closed(Vec<Point>),
-    /// A list of points creating a line. This is assumed open.
-    Open(Vec<Point>),
+pub struct Shape {
+    parts: MultiPolygon,
+    hull: Polygon,
+    pub min: Point,
+    pub max: Point,
 }
-impl Line {
-    /// Get a point with the given index.
-    pub fn point(&self, idx: usize)->Point {
-        match self {
-            Self::Closed(pts)|Self::Open(pts)=>pts[idx],
-        }
+impl Shape {
+    /// Creates a clockwise circle
+    #[allow(unused)]
+    pub fn circle(r: f64, min_points: usize, max_dist: f64)->Self {
+        let mut line = LineString::from(
+            ArcToPoints::new_circle(r, min_points, max_dist, true)
+                .map(|p|p.to_geo())
+                .collect::<Vec<_>>()
+        );
+        line.close();
+
+        let outline = Polygon::new(line, Vec::new());
+
+        return Self {
+            parts: outline.clone().into(),
+            hull: outline,
+            min: Point::new(-r, -r),
+            max: Point::new(r, r),
+        };
     }
 
-    /// Get the list of points.
-    pub fn points(&self)->&[Point] {
-        match self {
-            Self::Closed(pts)|Self::Open(pts)=>&pts,
+    /// NOTE: We sort the lines by area, so holes are more likely to be put into an outline instead
+    /// of by themselves. We also assume the outline has a larger area than its holes, which makes
+    /// sense.
+    pub fn from_lines(lines: Vec<LineString>)->Self {
+        let mut min = Point::new(f64::MAX, f64::MAX);
+        let mut max = Point::new(f64::MIN, f64::MIN);
+
+        let mut polys = lines.into_iter()
+            .map(|l|{
+                let min_x = l.coords()
+                    .map(|c|c.x)
+                    .min_by(|a,b|a.partial_cmp(b).unwrap())
+                    .unwrap();
+                let min_y = l.coords()
+                    .map(|c|c.y)
+                    .min_by(|a,b|a.partial_cmp(b).unwrap())
+                    .unwrap();
+
+                let max_x = l.coords()
+                    .map(|c|c.x)
+                    .max_by(|a,b|a.partial_cmp(b).unwrap())
+                    .unwrap();
+                let max_y = l.coords()
+                    .map(|c|c.y)
+                    .max_by(|a,b|a.partial_cmp(b).unwrap())
+                    .unwrap();
+
+                min.x = min.x.min(min_x);
+                min.y = min.y.min(min_y);
+
+                max.x = max.x.max(max_x);
+                max.y = max.y.max(max_y);
+
+                let p = Polygon::new(l, Vec::new());
+                let a = p.unsigned_area();
+                (p, a)
+            })
+            .collect::<Vec<_>>();
+
+        polys.sort_by(|(_, a1), (_, a2)|a1.partial_cmp(a2).unwrap());
+
+        let (largest_idx, _) = polys.iter()
+            .map(|(_, area)|*area)
+            .enumerate()
+            .min_by(|(_, a1), (_, a2)|a1.partial_cmp(a2).unwrap())
+            .unwrap();
+
+        let mut top_level = vec![polys.remove(largest_idx).0];
+
+        'poly_iter:for (poly, _) in polys {
+            for outline in top_level.iter_mut() {
+                if outline.contains(&poly) {
+                    let line = poly.into_inner().0;
+                    outline.interiors_push(line);
+
+                    continue 'poly_iter;
+                }
+            }
+
+            top_level.push(poly);
         }
+
+        let parts = MultiPolygon::new(top_level);
+
+        let hull = parts.convex_hull();
+
+        return Shape {
+            parts,
+            hull,
+            min,
+            max,
+        };
+    }
+
+    #[allow(unused)]
+    pub fn aabb(&self)->Polygon {
+        Polygon::new(LineString::new(vec![
+            Coord {
+                x: self.min.x,
+                y: self.min.y,
+            },
+            Coord {
+                x: self.min.x,
+                y: self.min.y,
+            },
+            Coord {
+                x: self.min.x,
+                y: self.min.y,
+            },
+            Coord {
+                x: self.min.x,
+                y: self.min.y,
+            },
+        ]), Vec::new())
     }
 }
-
 
 /// A model loaded from a DXF. We take in a list of lines from the DXF and process it to extract
 /// the outline and AABB. Once created, nothing can change. Transforms are stored externally.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
-    lines: Vec<Line>,
-    outline: Polygon,
+    shape: Shape,
     pub name: String,
-    pub segments: usize,
-    pub min: Point,
-    pub max: Point,
 }
 impl Model {
     /// Load a new model from a file path. See [`Model::new`] and [`load_model`] for more information.
@@ -111,49 +216,14 @@ impl Model {
         load_model(path)
     }
 
-    /// Create a new model from a list of lines. The largest one is assumed to be the outline and
-    /// all others are assumed to be inside of it.
-    fn new(mut lines: Vec<Line>, name: String)->Self {
-        let mut segments = 0;
-        let mut max = lines[0].point(0);
-        let mut min = lines[0].point(0);
-
-        let mut outline_idx = 0;
-
-        for (i, line) in lines.iter().enumerate() {
-            segments += line.points().len();
-            for point in line.points().iter() {
-                if max.x < point.x {
-                    outline_idx = i;
-                }
-
-                max.x = max.x.max(point.x);
-                max.y = max.y.max(point.y);
-
-                min.x = min.x.min(point.x);
-                min.y = min.y.min(point.y);
-            }
-        }
-
-        // Ensure the outline is the first item
-        if outline_idx != 0 {
-            lines.swap(0, outline_idx);
-        }
-
-        let outline = lines[0].points()
-            .into_iter()
-            .rev()
-            .map(|p|Coord{x:p.x,y:p.y})
-            .collect::<Vec<_>>();
-        let outline = Polygon::new(LineString::new(outline), Vec::new());
+    /// Create a new model from a list of lines. The largest one is assumed to be the outline. Each
+    /// other line is tested to see if it contains the other line, then they are inserted as holes.
+    fn new(lines: Vec<LineString>, name: String)->Self {
+        let shape = Shape::from_lines(lines);
 
         Model {
+            shape,
             name,
-            lines,
-            outline,
-            segments,
-            min,
-            max,
         }
     }
 
@@ -170,46 +240,60 @@ impl Model {
             laser_condition.sequence.len(),
         ));
 
-        builder.laser_on_const().eob();
-
         for (i, seq) in laser_condition.sequence.iter().enumerate() {
-            let passes = if seq.passes > 1 {"passes"} else {"pass"};
-            builder.comment_block(format!(
-                "- Begin sequence {} with {} {passes} at {}mm/min and {}% power",
-                i + 1,
-                seq.passes,
-                seq.feed,
-                (seq.power as f32) / 10.0,
-            ));
+            let passes_str = if seq.passes() > 1 {"passes"} else {"pass"};
+            match seq {
+                Seq::GrblConst{passes, feed, power}|Seq::GrblDyn{passes, feed, power}=>{
+                    builder.comment_block(format!(
+                        "- Begin GRBL sequence {} with {} {passes_str} at {}mm/min and {}% power",
+                        i + 1,
+                        passes,
+                        feed,
+                        (*power as f32) / 10.0,
+                    ));
+                },
+                Seq::Custom{passes, ..}=>{
+                    builder.comment_block(format!(
+                        "- Begin Custom sequence {} with {} {passes_str}",
+                        i + 1,
+                        passes,
+                    ));
+                },
+            }
 
-            for pass in 0..seq.passes {
+            for pass in 0..seq.passes() {
                 builder.comment_block(format!("-- Begin pass {}", pass + 1));
 
-                self.generate_gcode_lines(builder, mt, seq.power, seq.feed);
+                self.generate_gcode_lines(builder, mt, &seq);
             }
         }
-
-        builder.laser_off().eob();
 
         builder.comment_block(format!("End model `{}`", self.name));
     }
 
-    fn generate_gcode_lines(&self, builder: &mut GcodeBuilder, mt: &EntityState, laser_power: u16, feedrate: u16) {
-        for (i, line) in self.lines.iter().enumerate() {
-            if i == 0 {
-                builder.cutting_motion()
-                    .feed(feedrate)
-                    .laser_power(0)
-                    .eob();
-            }
+    fn lines_iter(&self)->impl Iterator<Item = &LineString> {
+        self.shape.parts.iter()
+            .map(|p|{
+                let ext = p.exterior();
+                let int_iter = p.interiors()
+                    .iter();
+                std::iter::once(ext)
+                    .chain(int_iter)
+            })
+            .flatten()
+    }
 
+    /// For each line we move to the start, turn on the laser, set the power and feedrate, perform
+    /// the cutting motion, turn off the laser, and repeat.
+    fn generate_gcode_lines(&self, builder: &mut GcodeBuilder, mt: &EntityState, seq: &Seq) {
+        let iter = self.lines_iter().enumerate();
+
+        for (i, line) in iter {
             builder.comment_block(format!("--- Start line {i}"));
 
-            let (Line::Closed(points)|Line::Open(points)) = line;
-
             // create an iterator of the points and transform them
-            let mut points_iter = points.iter()
-                .map(|p|transform_point(*p, mt));
+            let mut points_iter = line.coords()
+                .map(|p|mt.transform(p.to_uv()));
 
             let start = points_iter.next().unwrap();
             builder.rapid_motion()
@@ -217,78 +301,90 @@ impl Model {
                 .y(start.y)
                 .eob();
 
+            match seq {
+                Seq::GrblConst{power, feed, ..}=>{
+                    builder.cutting_motion()
+                        .laser_power(*power)
+                        .feed(*feed)
+                        .laser_on_const()
+                        .eob();
+                },
+                Seq::GrblDyn{power, feed, ..}=>{
+                    builder.cutting_motion()
+                        .laser_power(*power)
+                        .feed(*feed)
+                        .laser_on_dyn()
+                        .eob();
+                },
+                Seq::Custom{laser_on, feed, power, ..}=>{
+                    builder
+                        .custom(power.clone())
+                        .custom(feed.clone())
+                        .eob();
+
+                    builder
+                        .custom(laser_on.clone())
+                        .eob();
+                },
+            }
+
             for point in points_iter {
                 builder.cutting_motion()
                     .x(point.x)
                     .y(point.y)
-                    .laser_power(laser_power)
                     .eob();
             }
 
-            // close the line if it needs to be
-            match line {
-                Line::Closed(_)=>{
+            match seq {
+                Seq::GrblConst{..}|Seq::GrblDyn{..}=>{
                     builder.cutting_motion()
-                        .x(start.x)
-                        .y(start.y)
-                        .laser_power(laser_power)
+                        .laser_power(0)
+                        .laser_off()
                         .eob();
                 },
-                _=>{},
+                Seq::Custom{laser_off, ..}=>{
+                    builder.custom(laser_off.clone())
+                        .eob();
+                },
             }
-
-            builder.cutting_motion()
-                .laser_power(0)
-                .eob();
         }
-    }
-
-    /// Get the center of the model based on extents.
-    /// NOTE: This IS NOT center-of-mass.
-    #[allow(unused)]
-    pub fn center(&self)->Point {
-        let extents = self.max - self.min;
-
-        return self.min + (extents / 2.0);
     }
 
     /// Check if a point is within the outline of this model.
     /// We assume the given point is in model space and any transforms are performed prior to
     /// receiving it.
     pub fn point_within(&self, point: Point)->bool {
-        let x_bb = point.x >= self.min.x && point.x <= self.max.x;
-        let y_bb = point.y >= self.min.y && point.y <= self.max.y;
+        let x_bb = point.x >= self.shape.min.x && point.x <= self.shape.max.x;
+        let y_bb = point.y >= self.shape.min.y && point.y <= self.shape.max.y;
         if !(x_bb && y_bb) {
             return false;
         }
 
-        return self.outline.contains(&Coord{x:point.x,y:point.y});
+        return self.shape.hull.contains(&Coord{x:point.x,y:point.y});
     }
 
     /// Build the [`iced::Path`]s from this model and a transform.
     /// TODO(optimization): Reuse built paths and transform them instead of creating new ones every
     /// time.
-    pub fn paths(&self, mt: EntityState)->ModelPaths {
-        let mut paths = Vec::with_capacity(self.lines.len());
+    pub fn paths(&self, mt: EntityState, height: f64)->ModelPaths {
+        let mut paths = Vec::new();
 
-        let mut min = Point::new(999999999.0,999999999.0);
-        let mut max = Point::new(-99999999.0,-99999999.0);
+        let mut min = Point::new(f64::MAX, f64::MAX);
+        let mut max = Point::new(-f64::MAX, -f64::MAX);
 
-        for line in self.lines.iter() {
-            let (Line::Closed(points)|Line::Open(points)) = line;
-
+        for line in self.lines_iter() {
             // build the line based on the points
             let mut builder = PathBuilder::new();
-            let mut points_iter = points.iter()
+            let mut points_iter = line.coords()
                 .copied()
                 .map(|p|{
-                    let p = transform_point(p, &mt);
+                    let p = mt.transform(p.to_uv());
                     min.x = min.x.min(p.x);
                     min.y = min.y.min(p.y);
                     max.x = max.x.max(p.x);
                     max.y = max.y.max(p.y);
 
-                    p_conv(p)
+                    p.to_ydown(height).to_iced()
                 });
 
             let start = points_iter.next().unwrap();
@@ -298,25 +394,17 @@ impl Model {
                 builder.line_to(point);
             }
 
-            // If its a closed line, then ensure its closed
-            match line {
-                Line::Closed(_)=>builder.close(),
-                _=>{},
-            }
+            builder.close();
 
             paths.push(builder.build());
         }
 
-        // build the outline
-        let outline_min = min;
-        let outline_max = max;
-
         // Build the outline as a rectangle based on the AABB
         let mut builder = PathBuilder::new();
-        builder.move_to(p_conv(Point::new(outline_min.x, outline_min.y)));
-        builder.line_to(p_conv(Point::new(outline_max.x, outline_min.y)));
-        builder.line_to(p_conv(Point::new(outline_max.x, outline_max.y)));
-        builder.line_to(p_conv(Point::new(outline_min.x, outline_max.y)));
+        builder.move_to(Point::new(min.x, min.y).to_ydown(height).to_iced());
+        builder.line_to(Point::new(max.x, min.y).to_ydown(height).to_iced());
+        builder.line_to(Point::new(max.x, max.y).to_ydown(height).to_iced());
+        builder.line_to(Point::new(min.x, max.y).to_ydown(height).to_iced());
         builder.close();
 
         let ret = ModelPaths {
@@ -330,19 +418,20 @@ impl Model {
 
 /// An easy way to build lines and make sure the internal state is correct.
 #[derive(Debug, Default)]
-struct LineBuilder(Vec<Point>);
+struct LineBuilder(Vec<Coord>);
 impl LineBuilder {
     /// Try to add a segment to the line. If the first point in the segment is the same as the last
     /// point in the line, then add it. If not then return it in a `Result::Err`. This signals the
     /// caller to finish this line and start a new one.
     pub fn try_add(&mut self, seg: Segment)->StdResult<(), Segment> {
+        let seg2 = (seg.0.to_geo(), seg.1.to_geo());
         if self.0.is_empty() {
-            self.0.push(seg.0);
-            self.0.push(seg.1);
+            self.0.push(seg2.0);
+            self.0.push(seg2.1);
         } else {
             let last = self.0.last().unwrap();
-            if *last == seg.0 {
-                self.0.push(seg.1);
+            if *last == seg2.0 {
+                self.0.push(seg2.1);
             } else {
                 return Err(seg);
             }
@@ -355,20 +444,9 @@ impl LineBuilder {
     pub fn is_empty(&self)->bool {self.0.is_empty()}
 
     /// Finish the line and determine if it is supposed to be open or closed.
-    pub fn finish(mut self)->Line {
-        if self.0.is_empty() {
-            return Line::Open(self.0);
-        } else {
-            let first = self.0.first().unwrap();
-            let last = self.0.last().unwrap();
-
-            if first == last {
-                self.0.pop();
-                return Line::Closed(self.0);
-            } else {
-                return Line::Open(self.0);
-            }
-        }
+    #[inline]
+    pub fn finish(self)->LineString {
+        LineString::new(self.0)
     }
 }
 
@@ -467,6 +545,72 @@ impl<'a> Iterator for ModelIter<'a> {
     }
 }
 
+/// An iterator returning points along an arc. Might be a circle.
+///
+/// The points are returned in either clockwise or counter-clockwise order. The arc always starts
+/// on Y=0, X=r and goes "up" or "down" depending on {counter,}-clockwise
+///
+/// Attempts to create an iterator of points with an equal spacing of about `max_dist`. If the
+/// count is lower than `min_points`, then it will use that number of points.
+///
+/// NOTE: The `max_dist` uses the arc distance NOT the point-to-point distance to calculate the
+/// point count.
+pub struct ArcToPoints {
+    start: Point,
+    i: usize,
+    points: usize,
+    step: f64,
+}
+impl ArcToPoints {
+    /// Minor optimization to make things slightly more accurate
+    #[inline]
+    pub fn new_circle(r: f64, min_points: usize, max_dist: f64, clockwise: bool)->Self {
+        use std::f64::consts::TAU;
+
+        Self::new_arc(r, min_points, max_dist, clockwise, TAU)
+    }
+
+    /// Returns if the arc is clockwise or not.
+    #[inline]
+    #[allow(unused)]
+    pub fn is_clockwise(&self)->bool {
+        self.step > 0.0
+    }
+
+    /// NOTE: Angle is in Radians
+    pub fn new_arc(r: f64, min_points: usize, max_dist: f64, clockwise: bool, angle: f64)->Self {
+        let clockwise = if clockwise {1.0} else {-1.0};
+
+        let length = angle * r;
+        let points = ((length / max_dist).ceil() as usize)
+            .max(min_points);
+        let step = (angle / (points as f64)) * clockwise;
+
+        let start = Point{x: r, y: 0.0};
+
+        return ArcToPoints {
+            start,
+            step,
+            i: 0,
+            points,
+        };
+    }
+}
+impl Iterator for ArcToPoints {
+    type Item = Point;
+    fn next(&mut self)->Option<Point> {
+        if self.i == self.points {
+            return None;
+        }
+
+        let angle = self.step * (self.i as f64);
+        self.i += 1;
+        let point = self.start.rotated(Rotation::from_angle(angle));
+
+        return Some(point);
+    }
+}
+
 
 fn load_model<P: AsRef<StdPath>>(path: P)->Result<Model> {
     let path = path.as_ref();
@@ -547,7 +691,7 @@ fn load_model<P: AsRef<StdPath>>(path: P)->Result<Model> {
             Ok(())=>{},
         }
     }
-    
+
     if !line_builder.is_empty() {
         lines.push(line_builder.finish());
     }
@@ -557,12 +701,4 @@ fn load_model<P: AsRef<StdPath>>(path: P)->Result<Model> {
     }
 
     return Ok(Model::new(lines, name.into()));
-}
-
-fn transform_point(mut point: Point, mt: &EntityState)->Point {
-    if mt.flip {
-        point.y *= -1.0;
-    }
-
-    mt.transform.transform_vec(point)
 }

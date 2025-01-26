@@ -4,10 +4,14 @@ use iced::{
             Event,
             Status,
         },
-        path::Path,
+        path::{
+            Path,
+            Builder as PathBuilder,
+        },
         Cache,
         Program as CanvasProgram,
         Canvas,
+        Frame,
     },
     keyboard::{
         key::Named as NamedKey,
@@ -21,7 +25,6 @@ use iced::{
         ScrollDelta,
     },
     Color,
-    Point as IcedPoint,
     Element,
     Length,
     Theme,
@@ -45,8 +48,11 @@ use std::{
         HashMap,
         HashSet,
     },
+    cell::{
+        RefCell,
+        Cell,
+    },
     rc::Rc,
-    cell::RefCell,
 };
 use crate::{
     laser::{
@@ -55,6 +61,7 @@ use crate::{
     },
     model::*,
     gcode::*,
+    utils::*,
     Point,
     Transform,
     Translation,
@@ -69,37 +76,48 @@ pub enum SheetMessage {
     /// Recalculate the paths. We might have deselected something or changed the selection or
     /// something else.
     RecalcPaths,
+    /// Recalculate the paths for an Entity
+    RecalcPathsId(EntityId),
     /// Select an entity.
     Select(EntityId),
     /// Deselect and entity.
     Deselect(EntityId),
     /// An amount to pan relative to the previous position.
-    Pan(Translation),
+    Pan(Translation, Translation),
     /// An amount to move an entity and its index.
     Move(EntityId, Translation),
+    /// An amount to move an entity and its index. Also selects the entity.
+    SelectMove(EntityId, Translation),
     /// Contains the the cursor position.
-    ZoomIn(Point),
+    ZoomIn(Point, Point),
     /// Contains the the cursor position.
-    ZoomOut(Point),
+    ZoomOut(Point, Point),
 }
 
 /// What the current action is for the sheet.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum SheetState {
+    /// Delay the selection of an entity.
+    /// `DelaySelect(current_id, next_id, prev_cursor_pos)`
+    DelaySelect(EntityId, EntityId, Point),
     /// Where the previous mouse position is located and the index of the model
-    Select(EntityId),
+    Select(EntityId, Point),
     /// An amount to move a model and its index.
     Move(EntityId, Point),
 
     /// Pan with an entity selected.
-    PanSelected(EntityId, Point),
+    PanSelected(EntityId, Point, Point),
 
     /// Pan the screen.
-    Pan(Point),
+    Pan(Point, Point),
 
     /// Do nothing
-    #[default]
-    None,
+    None(Point),
+}
+impl Default for SheetState {
+    fn default()->Self {
+        Self::None(Point::zero())
+    }
 }
 
 
@@ -109,6 +127,15 @@ pub struct EntityState {
     pub transform: Transform,
     pub flip: bool,
     pub laser_condition: ConditionId,
+}
+impl EntityState {
+    pub fn transform(&self, mut point: Point)->Point {
+        if self.flip {
+            point.y *= -1.0;
+        }
+
+        self.transform.transform_vec(point)
+    }
 }
 
 /// A sheet to nest the models in. Has a sheet size to display an outline and handles displaying
@@ -124,7 +151,12 @@ pub struct Sheet {
     paths: HashMap<EntityId, (Color, ModelPaths)>,
     cached_models: HashMap<EntityId, Cache>,
     view: Transform,
+    world: Transform,
     sheet_cache: Cache,
+    window_height: Cell<f64>,
+    height_change: Cell<bool>,
+
+    recent_clicks: RefCell<HashSet<EntityId>>,
 }
 impl Sheet {
     pub fn new(models: ModelStore, laser_conditions: Rc<RefCell<ConditionStore>>)->Self {
@@ -135,9 +167,14 @@ impl Sheet {
             paths: HashMap::new(),
             cached_models: HashMap::new(),
             view: Transform::new(Translation::zero(), Rotation::from_angle(0.0), 1.0),
+            world: Transform::new(Translation::zero(), Rotation::from_angle(0.0), 1.0),
             sheet_size: Vector::new(300.0, 300.0),
             sheet_cache: Cache::new(),
             laser_conditions,
+            window_height: Cell::new(1000.0),
+            height_change: Cell::new(false),
+
+            recent_clicks: RefCell::new(HashSet::new()),
         }
     }
 
@@ -183,7 +220,7 @@ impl Sheet {
     pub fn add_model(&mut self, path: &str, qty: usize, laser_condition: ConditionId)->Result<()> {
         let transform = Transform::new(Translation::zero(), Rotation::from_angle(0.0), 1.0);
 
-        self.add_model_with_transform(path, EntityState {transform, flip:false, laser_condition}, qty)
+        self.add_model_with_transform(path, EntityState {transform, flip: false, laser_condition}, qty)
     }
 
     /// Add a model with a transform and quantity.
@@ -193,7 +230,7 @@ impl Sheet {
         let handle = self.models.add(model);
 
         self.add_model_from_handle_with_transform(handle, transform, qty);
-        
+
         return Ok(());
     }
 
@@ -220,7 +257,7 @@ impl Sheet {
 
             let id = next_entity_id();
             self.entities.insert(id, (handle.clone(), transform));
-            self.paths.insert(id, (color.into(), handle.paths(transform)));
+            self.paths.insert(id, (color.into(), handle.paths(transform, self.window_height.get())));
             self.cached_models.insert(id, Cache::new());
             transform.transform.translation += Point::new(5.0, 5.0);
         }
@@ -236,59 +273,132 @@ impl Sheet {
     }
 
     pub fn main_update(&mut self, msg: SheetMessage)->Task<SheetMessage> {
+        // If the height has changed, then recalc the paths.
+        if self.height_change.take() {
+            self.recalc_paths();
+        }
+
         match msg {
-            SheetMessage::RecalcPaths|
-                SheetMessage::Select(_)|
-                SheetMessage::Deselect(_)=>self.recalc_paths(),
+            SheetMessage::RecalcPaths=>self.recalc_paths(),
+            SheetMessage::RecalcPathsId(id)=>self.recalc_paths_id(id),
+            SheetMessage::Select(id)=>self.clear_cache_id(id),
+            SheetMessage::Deselect(id)=>{
+                self.recent_clicks.borrow_mut().clear();
+
+                self.clear_cache_id(id);
+            },
             SheetMessage::Move(id, delta)=>{
+                self.recent_clicks.borrow_mut().clear();
+
                 self.entities
                     .get_mut(&id)
                     .unwrap()
                     .1.transform
-                    .translation += delta / self.view.scale;
-                self.recalc_paths();
+                    .translation += delta / self.world.scale;
+
+                self.recalc_paths_id(id);
             },
-            SheetMessage::Pan(delta)=>{
+            SheetMessage::SelectMove(id, delta)=>{
+                self.clear_cache_id(id);
+                self.recent_clicks.borrow_mut().clear();
+
+                self.entities
+                    .get_mut(&id)
+                    .unwrap()
+                    .1.transform
+                    .translation += delta / self.world.scale;
+
+                self.recalc_paths_id(id);
+            },
+            SheetMessage::Pan(delta, w_delta)=>{
+                self.recent_clicks.borrow_mut().clear();
+
                 self.view.translation += delta;
-                self.recalc_paths();
+                self.world.translation += w_delta;
+
+                self.clear_cache();
             },
-            SheetMessage::ZoomIn(mouse_pos)=>{
+            SheetMessage::ZoomIn(mouse_pos, w_mouse_pos)=>{
                 const ZOOM: f64 = 1.1;
 
+                self.recent_clicks.borrow_mut().clear();
+
                 let mouse_offset = self.view.translation - mouse_pos;
                 let offset = (mouse_offset * ZOOM) - mouse_offset;
-                self.view.translation += offset;
+
+                self.view.translation.x += offset.x;
+                self.view.translation.y += offset.y;
 
                 self.view.scale *= ZOOM;
 
-                self.recalc_paths();
+                let mouse_offset = self.world.translation - w_mouse_pos;
+                let offset = (mouse_offset * ZOOM) - mouse_offset;
+
+                self.world.translation.x += offset.x;
+                self.world.translation.y += offset.y;
+
+                self.world.scale *= ZOOM;
+
+                self.clear_cache();
             },
-            SheetMessage::ZoomOut(mouse_pos)=>{
+            SheetMessage::ZoomOut(mouse_pos, w_mouse_pos)=>{
                 const ZOOM: f64 = 0.9;
 
+                self.recent_clicks.borrow_mut().clear();
+
                 let mouse_offset = self.view.translation - mouse_pos;
                 let offset = (mouse_offset * ZOOM) - mouse_offset;
-                self.view.translation += offset;
+
+                self.view.translation.x += offset.x;
+                self.view.translation.y += offset.y;
 
                 self.view.scale *= ZOOM;
 
-                self.recalc_paths();
+                let mouse_offset = self.world.translation - w_mouse_pos;
+                let offset = (mouse_offset * ZOOM) - mouse_offset;
+
+                self.world.translation.x += offset.x;
+                self.world.translation.y += offset.y;
+
+                self.world.scale *= ZOOM;
+
+                self.clear_cache();
             },
         }
 
         Task::none()
     }
 
-    /// Recalculate the paths and clear the geometry caches.
-    pub fn recalc_paths(&mut self) {
+    fn clear_cache(&self) {
         self.cached_models.values().for_each(Cache::clear);
         self.sheet_cache.clear();
+    }
+
+    fn clear_cache_id(&self, id: EntityId) {
+        if let Some(cache) = self.cached_models.get(&id) {
+            cache.clear();
+        }
+    }
+
+    /// Recalculate the paths and clear the geometry caches.
+    pub fn recalc_paths(&mut self) {
+        self.clear_cache();
+
         let store = self.laser_conditions.borrow();
         for (id, (handle, mt)) in self.entities.iter() {
             let condition = store.get(mt.laser_condition);
-            let mut mt = *mt;
-            mt.transform.append_similarity(self.view);
-            self.paths.insert(*id, (condition.color.into(), handle.paths(mt)));
+            self.paths.insert(*id, (condition.color.into(), handle.paths(*mt, self.window_height.get())));
+        }
+    }
+
+    /// Recalculate a specific Entity's paths and clear its geometry cache.
+    pub fn recalc_paths_id(&mut self, id: EntityId) {
+        self.clear_cache_id(id);
+
+        let store = self.laser_conditions.borrow();
+        if let Some((handle, mt)) = self.entities.get(&id) {
+            let condition = store.get(mt.laser_condition);
+            self.paths.insert(id, (condition.color.into(), handle.paths(*mt, self.window_height.get())));
         }
     }
 
@@ -297,6 +407,37 @@ impl Sheet {
         self.entities.remove(&id);
         self.paths.remove(&id);
         self.cached_models.remove(&id);
+    }
+
+    pub fn change_width(&mut self, width: f64) {
+        self.sheet_size.x = width;
+        self.sheet_cache.clear();
+    }
+
+    pub fn change_height(&mut self, height: f64) {
+        self.sheet_size.y = height;
+        self.sheet_cache.clear();
+    }
+
+    fn draw_line(&self, f: &mut Frame, line: &Path, color: Color, width: f32) {
+        let stroke = Stroke {
+            style: Style::Solid(color),
+            width,
+            line_join: LineJoin::Miter,
+            line_cap: LineCap::Square,
+            ..Stroke::default()
+        };
+
+        f.stroke(line, stroke);
+    }
+
+    fn transform_frame(&self, frame: &mut Frame, _bounds: Size) {
+        frame.translate(iced::Vector {
+            x: self.view.translation.x as f32,
+            // y: (bounds.height - self.view.translation.y as f32),
+            y: self.view.translation.y as f32,
+        });
+        frame.scale(self.view.scale as f32);
     }
 }
 impl CanvasProgram<SheetMessage> for Sheet {
@@ -314,24 +455,45 @@ impl CanvasProgram<SheetMessage> for Sheet {
         let sheet_fg_color = theme.palette().primary;
         let mut ret = Vec::new();
 
+        let height = bounds.height as f64;
+
         assert!(self.entities.len() == self.paths.len());
         assert!(self.entities.len() == self.cached_models.len());
+
+        let size = Size {
+            width: bounds.width,
+            height: bounds.height,
+        };
 
         // draw the sheet first
         ret.push(self.sheet_cache.draw(
             renderer,
-            Size {
-                width: bounds.width,
-                height: bounds.height,
-            },
+            size,
             |frame|{
-                let sheet_size = self.sheet_size * self.view.scale;
-                let size = Size {
-                    width: sheet_size.x as f32,
-                    height: sheet_size.y as f32,
-                };
-                let point = self.view.transform_vec(Point::zero());
-                let point = IcedPoint::new(point.x as f32, point.y as f32);
+                self.transform_frame(frame, size);
+
+                let sheet_size = self.sheet_size;
+
+                let mut builder = PathBuilder::new();
+                builder.move_to(Point::new(
+                    0.0,
+                    0.0,
+                ).to_ydown(height).to_iced());
+                builder.line_to(Point::new(
+                    sheet_size.x,
+                    0.0,
+                ).to_ydown(height).to_iced());
+                builder.line_to(Point::new(
+                    sheet_size.x,
+                    sheet_size.y,
+                ).to_ydown(height).to_iced());
+                builder.line_to(Point::new(
+                    0.0,
+                    sheet_size.y,
+                ).to_ydown(height).to_iced());
+                builder.close();
+
+                let path = builder.build();
 
                 // do the background of the sheet
                 // frame.fill(
@@ -346,19 +508,7 @@ impl CanvasProgram<SheetMessage> for Sheet {
                 // );
 
                 // do the outline of the sheet
-                frame.stroke(
-                    &Path::rectangle(
-                        point,
-                        size,
-                    ),
-                    Stroke {
-                        style: Style::Solid(sheet_fg_color),
-                        width: 2.0,
-                        line_join: LineJoin::Miter,
-                        line_cap: LineCap::Square,
-                        ..Stroke::default()
-                    },
-                );
+                self.draw_line(frame, &path, sheet_fg_color, 2.0);
             },
         ));
 
@@ -374,33 +524,18 @@ impl CanvasProgram<SheetMessage> for Sheet {
                 |frame|{
                     use SheetState as State;
 
-                    let stroke = Stroke {
-                        style: Style::Solid(*color),
-                        width: 1.0,
-                        line_join: LineJoin::Miter,
-                        line_cap: LineCap::Square,
-                        ..Stroke::default()
-                    };
+                    self.transform_frame(frame, size);
 
                     // Do the main path before the outline so the outline shows over the paths
                     for path in paths.lines.iter() {
-                        frame.stroke(
-                            path,
-                            stroke,
-                        );
+                        self.draw_line(frame, &path, *color, 1.0);
                     }
 
                     // do the outline
                     match state {
-                        State::Move(idx, _)|State::Select(idx)|State::PanSelected(idx, _)=>{
+                        State::Move(idx, _)|State::Select(idx, _)|State::PanSelected(idx, ..)|State::DelaySelect(idx, ..)=>{
                             if id == idx {
-                                frame.stroke(
-                                    &paths.outline,
-                                    Stroke {
-                                        style: Style::Solid(outline_color),
-                                        ..stroke
-                                    },
-                                );
+                                self.draw_line(frame, &paths.outline, outline_color, 1.0);
                             }
                         },
                         _=>{},
@@ -421,15 +556,27 @@ impl CanvasProgram<SheetMessage> for Sheet {
         cursor: Cursor,
     ) -> (Status, Option<SheetMessage>) {
         use SheetState as State;
+
+        let height = bounds.height as f64;
+        let old_height = self.window_height.get();
+
+        self.window_height.set(height);
+        self.height_change.set(old_height == height);
+
         if cursor.is_over(bounds) {
-            let cursor_pos = cursor.position_in(bounds).unwrap();
-            let cursor_pos = Point::new(cursor_pos.x as f64, cursor_pos.y as f64);
+            let cursor_pos = cursor.position_in(bounds)
+                .unwrap()
+                .to_uv();
+            let move_pos = cursor.position_in(bounds)
+                .unwrap()
+                .to_yup(height);
+
             match event {
                 Event::Keyboard(e)=>{
                     // let movement = (1.0 / self.view.scale.sqrt()).min(5.0);
                     let movement = 1.0;
                     let id = match state {
-                        State::Select(id)=>*id,
+                        State::Select(id, _)=>*id,
                         _=>return (Status::Ignored, None),
                     };
                     match e {
@@ -444,11 +591,11 @@ impl CanvasProgram<SheetMessage> for Sheet {
                             ),
                             NamedKey::ArrowUp=>return (
                                 Status::Captured,
-                                Some(SheetMessage::Move(id, Vector::new(0.0, -movement))),
+                                Some(SheetMessage::Move(id, Vector::new(0.0, movement))),
                             ),
                             NamedKey::ArrowDown=>return (
                                 Status::Captured,
-                                Some(SheetMessage::Move(id, Vector::new(0.0, movement))),
+                                Some(SheetMessage::Move(id, Vector::new(0.0, -movement))),
                             ),
                             _=>{},
                         },
@@ -458,12 +605,43 @@ impl CanvasProgram<SheetMessage> for Sheet {
                 Event::Mouse(e)=>{
                     match e {
                         MouseEvent::ButtonPressed(MouseButton::Left)=>{
-                            let mouse_offset = cursor_pos;
+                            let mut fallback_id = None;
+                            let mut found_id = None;
+
+                            let mut rc = self.recent_clicks.borrow_mut();
+
+                            let mut cleared = None;
+
                             for (id, (model, mt)) in self.entities.iter() {
-                                let mut model_tr = mt.transform;
-                                model_tr.append_similarity(self.view);
-                                let inv_model_view = model_tr.inversed();
-                                let mut model_point = inv_model_view.transform_vec(mouse_offset);
+                                // let mut model_tr = mt.transform;
+                                // model_tr.append_similarity(self.view);
+                                // let inv_model_view = model_tr.inversed();
+                                // let mut model_point = inv_model_view
+                                //     .transform_vec(cursor_pos)
+                                //     .to_ydown(height);
+
+                                // let view_point = inv_view.transform_vec(move_pos);
+                                let mut view_point = move_pos;
+                                let t = self.world.translation;
+
+                                view_point.x = view_point.x - t.x;
+                                view_point.y = view_point.y - t.y;
+
+                                view_point /= self.world.scale;
+
+                                let inv_model = mt.transform.inversed();
+                                let mut model_point = inv_model.transform_vec(view_point);
+
+                                // dbg!(
+                                //     self.world.translation,
+                                //     self.view.translation,
+                                //     self.world.scale,
+                                //     move_pos,
+                                //     cursor_pos,
+                                //     view_point,
+                                //     model_point,
+                                // );
+                                // eprintln!();
 
                                 if mt.flip {
                                     model_point.y *= -1.0;
@@ -471,23 +649,68 @@ impl CanvasProgram<SheetMessage> for Sheet {
 
                                 if model.point_within(model_point) {
                                     match state {
-                                        State::Select(idx)=>if idx == id {
-                                            eprintln!("Start move {id:?}");
-                                        } else {
-                                            eprintln!("Select and start move {id:?}");
+                                        State::Select(id2, _)|State::DelaySelect(id2, ..)=>{
+                                            if id == id2 || rc.contains(id) {
+                                                eprintln!("Click fallback {id:?}");
+                                                fallback_id = Some(*id);
+                                            } else {
+                                                if found_id.is_none() {
+                                                    found_id = Some(*id);
+                                                }
+                                            }
                                         },
-                                        _=>eprintln!("Select and start move {id:?}"),
+                                        _=>{
+                                            if found_id.is_none() {
+                                                found_id = Some(*id);
+                                            }
+                                        },
                                     }
-                                    *state = State::Move(*id, cursor_pos);
-                                    return (Status::Captured, Some(SheetMessage::Select(*id)));
+                                } else {
+                                    match state {
+                                        State::Select(id2, _)|State::DelaySelect(id2, ..)=>{
+                                            eprintln!("Missed selected entity {id2:?}");
+                                            if id == id2 {
+                                                eprintln!("Cleared {id2:?}");
+                                                cleared = Some(*id2);
+                                                *state = State::None(move_pos);
+                                            }
+                                        },
+                                        _=>{},
+                                    }
                                 }
                             }
 
+                            if fallback_id.is_some() && found_id.is_none() {
+                                eprintln!("Cycled all entities under cursor. Restarting.");
+                                rc.clear();
+                            }
+
+                            if let Some(id) = found_id.or(fallback_id) {
+                                eprintln!("Select and start move {id:?}");
+                                rc.insert(id);
+                                match state {
+                                    State::Select(current_id, ..) if fallback_id.is_some()=>{
+                                        eprintln!("Delay selection incase of move");
+                                        *state = State::DelaySelect(*current_id, id, move_pos);
+                                        return (Status::Captured, None);
+                                    },
+                                    _=>{
+                                        *state = State::Move(id, move_pos);
+                                        return (Status::Captured, Some(SheetMessage::Select(id)));
+                                    },
+                                }
+                            }
+
+                            if let Some(id) = cleared {
+                                eprintln!("Deselect {id:?}");
+                                *state = State::None(move_pos);
+                                return (Status::Captured, Some(SheetMessage::Deselect(id)));
+                            }
                             match state {
-                                State::Select(id)=>{
+                                State::Select(id, _)|State::DelaySelect(id, ..)=>{
                                     let id = *id;
                                     eprintln!("Deselect {id:?}");
-                                    *state = State::None;
+                                    *state = State::None(move_pos);
                                     return (Status::Captured, Some(SheetMessage::Deselect(id)));
                                 },
                                 _=>{},
@@ -497,10 +720,16 @@ impl CanvasProgram<SheetMessage> for Sheet {
                         },
                         MouseEvent::ButtonReleased(MouseButton::Left)=>{
                             match state {
-                                State::Move(id,_ )=>{
+                                State::Move(id, _)=>{
                                     eprintln!("Stop move {id:?}");
-                                    *state = State::Select(*id);
+                                    *state = State::Select(*id, move_pos);
                                     return (Status::Captured, None);
+                                },
+                                State::DelaySelect(_, id, _)=>{
+                                    eprintln!("Stop delayed select {id:?}");
+                                    let id = *id;
+                                    *state = State::Select(id, move_pos);
+                                    return (Status::Captured, Some(SheetMessage::Select(id)));
                                 },
                                 _=>{},
                             }
@@ -508,12 +737,12 @@ impl CanvasProgram<SheetMessage> for Sheet {
                         },
                         MouseEvent::ButtonPressed(MouseButton::Right)=>{
                             match state {
-                                State::Select(id)=>{
+                                State::Select(id, _)=>{
                                     eprintln!("Start pan with selection {id:?}");
-                                    *state = State::PanSelected(*id, cursor_pos);
+                                    *state = State::PanSelected(*id, cursor_pos, move_pos);
                                 },
-                                State::None=>{
-                                    *state = State::Pan(cursor_pos);
+                                State::None(_)=>{
+                                    *state = State::Pan(cursor_pos, move_pos);
                                     eprintln!("Start pan");
                                 },
                                 _=>{},
@@ -522,13 +751,13 @@ impl CanvasProgram<SheetMessage> for Sheet {
                         },
                         MouseEvent::ButtonReleased(MouseButton::Right)=>{
                             match state {
-                                State::Pan(_)=>{
-                                    *state = State::None;
+                                State::Pan(_, _)=>{
+                                    *state = State::None(move_pos);
                                     eprintln!("Stop pan");
                                 },
-                                State::PanSelected(id, _)=>{
+                                State::PanSelected(id, _, _)=>{
                                     eprintln!("Stop pan with selection {id:?}");
-                                    *state = State::Select(*id);
+                                    *state = State::Select(*id, move_pos);
                                 },
                                 _=>{},
                             }
@@ -536,35 +765,63 @@ impl CanvasProgram<SheetMessage> for Sheet {
                         },
                         MouseEvent::CursorMoved{..}=>{
                             match state {
-                                State::Pan(prev)|State::PanSelected(_, prev)=>{
+                                State::Pan(prev, w_prev)|State::PanSelected(_, prev, w_prev)=>{
                                     let delta = cursor_pos - *prev;
                                     *prev = cursor_pos;
 
-                                    return (
-                                        Status::Captured,
-                                        Some(SheetMessage::Pan(delta)),
-                                    );
-                                },
-                                State::Move(idx, prev)=>{
-                                    let idx = *idx;
-                                    let delta = cursor_pos - *prev;
-                                    *state = State::Move(idx, cursor_pos);
+                                    let w_delta = move_pos - *w_prev;
+                                    *w_prev = move_pos;
+
+                                    if delta.mag_sq() >= 8.0 {
+                                        self.recent_clicks.borrow_mut().clear();
+                                    }
 
                                     return (
                                         Status::Captured,
-                                        Some(SheetMessage::Move(idx, delta)),
+                                        Some(SheetMessage::Pan(delta, w_delta)),
                                     );
                                 },
-                                _=>{},
+                                State::Move(id, prev)|State::DelaySelect(id, _, prev)=>{
+                                    let id = *id;
+                                    let delta = move_pos - *prev;
+
+                                    if delta.mag_sq() >= 8.0 {
+                                        self.recent_clicks.borrow_mut().clear();
+                                    }
+
+                                    match state {
+                                        State::DelaySelect(..)=>{
+                                            *state = State::Move(id, move_pos);
+                                            return (
+                                                Status::Captured,
+                                                Some(SheetMessage::SelectMove(id, delta)),
+                                            );
+                                        },
+                                        _=>{
+                                            *state = State::Move(id, move_pos);
+                                            return (
+                                                Status::Captured,
+                                                Some(SheetMessage::Move(id, delta)),
+                                            );
+                                        },
+                                    }
+                                },
+                                State::Select(_, prev)|State::None(prev)=>{
+                                    let delta = move_pos - *prev;
+                                    *prev = move_pos;
+                                    if delta.mag_sq() >= 8.0 {
+                                        self.recent_clicks.borrow_mut().clear();
+                                    }
+                                },
                             }
                         },
                         MouseEvent::WheelScrolled{delta:ScrollDelta::Lines{y,..}}=>{
                             let msg = if y > 0.0 {
                                 eprintln!("Zoom in");
-                                SheetMessage::ZoomIn(cursor_pos)
+                                SheetMessage::ZoomIn(cursor_pos, move_pos)
                             } else {
                                 eprintln!("Zoom out");
-                                SheetMessage::ZoomOut(cursor_pos)
+                                SheetMessage::ZoomOut(cursor_pos, move_pos)
                             };
                             return (Status::Captured, Some(msg));
                         },

@@ -8,7 +8,7 @@ use std::fmt::{
 use GcodeInstruction as Ins;
 
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum GcodeInstruction {
     G(u16),
     S(u16),
@@ -16,6 +16,7 @@ pub enum GcodeInstruction {
     F(u16),
     X(f64),
     Y(f64),
+    Custom(String),
 }
 impl Display for GcodeInstruction {
     fn fmt(&self, f: &mut Formatter)->FmtResult {
@@ -27,6 +28,7 @@ impl Display for GcodeInstruction {
             F(n)=>write!(f,"F{n}"),
             X(flt)=>write!(f,"X{flt:.6}"),
             Y(flt)=>write!(f,"Y{flt:.6}"),
+            Custom(s)=>s.fmt(f),
         }
     }
 }
@@ -102,6 +104,11 @@ impl GcodeBuilder {
 
     pub fn cutting_motion(&mut self)->&mut Self {
         self.current_block.push(Ins::G(1));
+        return self;
+    }
+
+    pub fn custom(&mut self, s: String)->&mut Self {
+        self.current_block.push(Ins::Custom(s));
         return self;
     }
 

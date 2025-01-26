@@ -46,10 +46,12 @@ mod model;
 mod sheet;
 mod gcode;
 mod laser;
+mod utils;
 
 
 pub type Point = ultraviolet::DVec2;
 pub type Vector = ultraviolet::DVec2;
+/// Positive angles rotate clockwise, negative counter clockwise
 pub type Rotation = ultraviolet::DRotor2;
 pub type Transform = ultraviolet::DSimilarity2;
 pub type Translation = ultraviolet::DVec2;
@@ -133,7 +135,8 @@ struct EntityParams {
     id: EntityId,
     x: String,
     y: String,
-    rotation: f64,
+    angle: f64,
+    angle_string: String,
     scale: String,
     flip: bool,
     laser_condition: ConditionId,
@@ -371,6 +374,8 @@ impl MainProgram {
 
         widget::scrollable(
             column![
+                #[cfg(debug_assertions)]
+                text!("Entity: {:?}", params.id),
                 row![
                     text!("X: "),
                     widget::text_input(
@@ -394,12 +399,12 @@ impl MainProgram {
                     column![
                         widget::slider(
                             0.0..=360.0,
-                            params.rotation,
+                            params.angle,
                             Message::EntityParamsAngle,
-                        ),
+                        ).step(1.0),
                         widget::TextInput::new(
                             "Angle",
-                            format!("{:.6}", params.rotation).as_str(),
+                            params.angle_string.as_str(),
                         )
                             .on_input(Message::EntityParamsAngleString),
                     ],
@@ -444,19 +449,23 @@ impl MainProgram {
         match msg {
             Message::Sheet(msg)=>{
                 match msg {
-                    SheetMessage::Select(id)=>{
+                    SheetMessage::Select(id)|SheetMessage::SelectMove(id, _)=>{
                         let mt = &self.sheets[self.active_sheet]
                             .entities[&id].1;
                         let rotation = mt.transform.rotation.normalized();
                         let mut vec = Vector::new(1.0, 0.0);
                         rotation.rotate_vec(&mut vec);
-                        let angle = vec.y.atan2(vec.x).to_degrees();
+                        let mut angle = vec.y.atan2(vec.x).to_degrees();
+                        if angle < 0.0 {
+                            angle += 360.0;
+                        }
                         self.entity_params = Some(EntityParams {
                             id,
-                            x: format!("{:.6}", mt.transform.translation.x),
-                            y: format!("{:.6}", mt.transform.translation.y),
-                            rotation: angle,
-                            scale: format!("{:.6}", mt.transform.scale),
+                            x: mt.transform.translation.x.to_string(),
+                            y: mt.transform.translation.y.to_string(),
+                            angle,
+                            angle_string: angle.to_string(),
+                            scale: mt.transform.scale.to_string(),
                             flip: mt.flip,
                             laser_condition: mt.laser_condition,
                         });
@@ -473,8 +482,8 @@ impl MainProgram {
                             let entity = self.sheets[self.active_sheet]
                                 .entities[&params.id].1;
 
-                            params.x = format!("{:.6}", entity.transform.translation.x);
-                            params.y = format!("{:.6}", entity.transform.translation.y);
+                            params.x = entity.transform.translation.x.to_string();
+                            params.y = entity.transform.translation.y.to_string();
                         }
                     },
                     _=>{},
@@ -507,8 +516,8 @@ impl MainProgram {
                 self.sheets.push(Sheet::new(self.models.clone(), self.conditions.get_store()));
 
                 self.sheet_size = [
-                    format!("{:.6}", self.sheets[self.active_sheet].sheet_size.x),
-                    format!("{:.6}", self.sheets[self.active_sheet].sheet_size.y),
+                    format!("{}", self.sheets[self.active_sheet].sheet_size.x),
+                    format!("{}", self.sheets[self.active_sheet].sheet_size.y),
                 ];
             },
             Message::DeleteSheet=>{
@@ -530,21 +539,21 @@ impl MainProgram {
                 }
 
                 self.sheet_size = [
-                    format!("{:.6}", self.sheets[self.active_sheet].sheet_size.x),
-                    format!("{:.6}", self.sheets[self.active_sheet].sheet_size.y),
+                    format!("{}", self.sheets[self.active_sheet].sheet_size.x),
+                    format!("{}", self.sheets[self.active_sheet].sheet_size.y),
                 ];
             },
             Message::SelectSheet(idx)=>{
                 self.active_sheet = idx;
 
                 self.sheet_size = [
-                    format!("{:.6}", self.sheets[self.active_sheet].sheet_size.x),
-                    format!("{:.6}", self.sheets[self.active_sheet].sheet_size.y),
+                    format!("{}", self.sheets[self.active_sheet].sheet_size.x),
+                    format!("{}", self.sheets[self.active_sheet].sheet_size.y),
                 ];
             },
             Message::ResizePane(event)=>self.panes.resize(event.split, event.ratio),
             Message::AddModel(handle)=>{
-                
+
                 self.sheets[self.active_sheet]
                     .add_model_from_handle(handle, 1, self.conditions.default_condition());
             },
@@ -573,7 +582,7 @@ impl MainProgram {
                     let Some(params) = self.entity_params
                         .as_mut() else {return Task::none()};
 
-                    params.x = format!("{:.6}", f);
+                    params.x = val;
                     self.sheets[self.active_sheet]
                         .entities.get_mut(&params.id)
                         .unwrap().1
@@ -588,7 +597,7 @@ impl MainProgram {
                     let Some(params) = self.entity_params
                         .as_mut() else {return Task::none()};
 
-                    params.y = format!("{:.6}", f);
+                    params.y = val;
                     self.sheets[self.active_sheet]
                         .entities.get_mut(&params.id)
                         .unwrap().1
@@ -602,7 +611,8 @@ impl MainProgram {
                 let Some(params) = self.entity_params
                     .as_mut() else {return Task::none()};
 
-                params.rotation = val;
+                params.angle = val;
+                params.angle_string = val.to_string();
                 self.sheets[self.active_sheet]
                     .entities.get_mut(&params.id)
                     .unwrap().1
@@ -616,7 +626,8 @@ impl MainProgram {
                     let Some(params) = self.entity_params
                         .as_mut() else {return Task::none()};
 
-                    params.rotation = f;
+                    params.angle = f;
+                    params.angle_string = val;
                     self.sheets[self.active_sheet]
                         .entities.get_mut(&params.id)
                         .unwrap().1
@@ -631,12 +642,15 @@ impl MainProgram {
                     let Some(params) = self.entity_params
                         .as_mut() else {return Task::none()};
 
-                    params.scale = format!("{:.6}", f);
-                    self.sheets[self.active_sheet]
-                        .entities.get_mut(&params.id)
-                        .unwrap().1
-                        .transform
-                        .scale = f;
+                    if val.len() > 0 {
+                        self.sheets[self.active_sheet]
+                            .entities.get_mut(&params.id)
+                            .unwrap().1
+                            .transform
+                            .scale = f;
+                    }
+
+                    params.scale = val;
 
                     self.sheets[self.active_sheet].recalc_paths();
                 }
@@ -677,22 +691,16 @@ impl MainProgram {
             },
             Message::ChangeSheetWidth(val)=>{
                 if let Some(f) = parse_float(&val) {
-                    self.sheets[self.active_sheet]
-                        .sheet_size.x = f;
+                    self.sheet_size[0] = val;
 
-                    self.sheet_size[0] = format!("{:.6}", f);
-
-                    self.sheets[self.active_sheet].recalc_paths();
+                    self.sheets[self.active_sheet].change_width(f);
                 }
             },
             Message::ChangeSheetHeight(val)=>{
                 if let Some(f) = parse_float(&val) {
-                    self.sheets[self.active_sheet]
-                        .sheet_size.y = f;
+                    self.sheet_size[1] = val;
 
-                    self.sheet_size[1] = format!("{:.6}", f);
-
-                    self.sheets[self.active_sheet].recalc_paths();
+                    self.sheets[self.active_sheet].change_height(f);
                 }
             },
             Message::SaveGcode(opt_file)=>{
@@ -811,8 +819,8 @@ impl Default for MainProgram {
 
         MainProgram {
             sheet_size: [
-                format!("{:.6}", sheet.sheet_size.x),
-                format!("{:.6}", sheet.sheet_size.y),
+                format!("{}", sheet.sheet_size.x),
+                format!("{}", sheet.sheet_size.y),
             ],
             panes: PaneState::with_configuration(Configuration::Split {
                 axis: Axis::Vertical,
@@ -852,13 +860,6 @@ fn main()->iced::Result {
         .centered()
         .theme(|_|Theme::Dark)
         .run()
-}
-
-pub fn p_conv(uv: Point)->iced::Point {
-    iced::Point {
-        x: uv.x as f32,
-        y: uv.y as f32,
-    }
 }
 
 pub fn parse_float(s: &str)->Option<f64> {
