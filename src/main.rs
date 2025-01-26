@@ -374,8 +374,6 @@ impl MainProgram {
 
         widget::scrollable(
             column![
-                #[cfg(debug_assertions)]
-                text!("Entity: {:?}", params.id),
                 row![
                     text!("X: "),
                     widget::text_input(
