@@ -29,6 +29,7 @@ gcode your laser uses.
     something is moved, the view is panned, or scaled. Now it only updates the specific entity's
     paths when it is moved on the sheet. Nothing gets recalculated when the view is panned or
     zoomed.
+- GCODE generation now cuts the outline last so the part hopefully does not shift during cutting.
 
 ### Selecting between stacked entities and moving them
 Before when two entities were stacked on each other, you could not select between the different

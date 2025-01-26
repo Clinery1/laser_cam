@@ -271,14 +271,16 @@ impl Model {
         builder.comment_block(format!("End model `{}`", self.name));
     }
 
+    /// Iterate over the lines. Do the interior lines first, then the outline for each polygon.
     fn lines_iter(&self)->impl Iterator<Item = &LineString> {
         self.shape.parts.iter()
             .map(|p|{
                 let ext = p.exterior();
                 let int_iter = p.interiors()
                     .iter();
-                std::iter::once(ext)
-                    .chain(int_iter)
+
+                int_iter
+                    .chain(std::iter::once(ext))
             })
             .flatten()
     }
