@@ -38,3 +38,18 @@ select the next entity under the cursor.
 Additionally, when moving stacked entities it would chose the oldest one and move that one. As
 mentioned above, it cycles the selection, and when you click, release, then click-and-drag, it now moves
 the one you expect (or at least the one I expect).
+
+
+# 0.1.0
+# Additions
+Everything. The world. The galaxy. All life.
+
+Not really. Just these things:
+- A way to load DXF files
+- A way to move those files around in a viewer
+- Customizing the sheet sizes
+- Laser feed and power settings per-sheet
+- A list of loaded models and their names
+- A text box to name sheets even though we can't save them yet
+- Generating GCODE from a nested sheet of models
+- Deleting a sheet
