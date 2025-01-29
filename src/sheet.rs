@@ -8,10 +8,15 @@ use iced::{
             Path,
             Builder as PathBuilder,
         },
+        Text as CanvasText,
         Cache,
         Program as CanvasProgram,
         Canvas,
         Frame,
+    },
+    alignment::{
+        Vertical as VerticalAlign,
+        Horizontal as HorizontalAlign,
     },
     keyboard::{
         key::Named as NamedKey,
@@ -41,6 +46,7 @@ use iced_graphics::geometry::{
     LineCap,
     LineJoin,
 };
+use indexmap::IndexSet;
 use time::OffsetDateTime;
 use anyhow::Result;
 use std::{
@@ -92,6 +98,13 @@ pub enum SheetMessage {
     ZoomIn(Point, Point),
     /// Contains the the cursor position.
     ZoomOut(Point, Point),
+
+    Delete(EntityId),
+
+    StartOrder,
+    SetShowOrder(bool),
+    AddToOrder(EntityId),
+    FinishOrder(EntityId),
 }
 
 /// What the current action is for the sheet.
@@ -110,6 +123,11 @@ pub enum SheetState {
 
     /// Pan the screen.
     Pan(Point, Point),
+
+    OrderEdit,
+    OrderEditSelect(EntityId),
+    OrderEditPan(Point, Point),
+    OrderEditPanSelect(EntityId, Point, Point),
 
     /// Do nothing
     None(Point),
@@ -141,7 +159,7 @@ impl EntityState {
 /// A sheet to nest the models in. Has a sheet size to display an outline and handles displaying
 /// all instances of a model.
 pub struct Sheet {
-    pub active_models: HashMap<ModelHandle, HashSet<usize>>,
+    pub active_models: HashMap<ModelHandle, HashSet<EntityId>>,
     pub entities: HashMap<EntityId, (ModelHandle, EntityState)>,
     pub sheet_size: Vector,
 
@@ -157,6 +175,12 @@ pub struct Sheet {
     height_change: Cell<bool>,
 
     recent_clicks: RefCell<HashSet<EntityId>>,
+
+    order: IndexSet<EntityId>,
+
+    pub show_order: bool,
+    pub reorder: bool,
+    pub grbl_comments: bool,
 }
 impl Sheet {
     pub fn new(models: ModelStore, laser_conditions: Rc<RefCell<ConditionStore>>)->Self {
@@ -175,11 +199,20 @@ impl Sheet {
             height_change: Cell::new(false),
 
             recent_clicks: RefCell::new(HashSet::new()),
+
+            order: IndexSet::new(),
+
+            show_order: false,
+            reorder: false,
+            grbl_comments: false,
         }
     }
 
     pub fn generate_gcode(&self, name: &str)->String {
         let mut builder = GcodeBuilder::default();
+        if self.grbl_comments {
+            builder.set_grbl_mode();
+        }
         let now = OffsetDateTime::now_local()
             .unwrap_or(OffsetDateTime::now_utc());
 
@@ -252,11 +285,10 @@ impl Sheet {
         drop(store);
 
         for _ in 0..qty {
-            let entity_idx = self.entities.len();
-            model_entity_list.insert(entity_idx);
-
             let id = next_entity_id();
+            model_entity_list.insert(id);
             self.entities.insert(id, (handle.clone(), transform));
+            self.order.insert(id);
             self.paths.insert(id, (color.into(), handle.paths(transform, self.window_height.get())));
             self.cached_models.insert(id, Cache::new());
             transform.transform.translation += Point::new(5.0, 5.0);
@@ -282,6 +314,24 @@ impl Sheet {
             SheetMessage::RecalcPaths=>self.recalc_paths(),
             SheetMessage::RecalcPathsId(id)=>self.recalc_paths_id(id),
             SheetMessage::Select(id)=>self.clear_cache_id(id),
+            SheetMessage::Delete(id)=>self.delete_entity(id),
+            SheetMessage::StartOrder=>{
+                if self.entities.len() > 0 {
+                    self.order.clear();
+                    eprintln!("Start order");
+                    self.reorder = true;
+                } else {
+                    eprintln!("No entities. Not starting order");
+                }
+            },
+            SheetMessage::SetShowOrder(b)=>{
+                self.show_order = b;
+                if self.show_order {
+                    eprintln!("Showing entities");
+                } else {
+                    eprintln!("Hiding entities");
+                }
+            },
             SheetMessage::Deselect(id)=>{
                 self.recent_clicks.borrow_mut().clear();
 
@@ -364,6 +414,21 @@ impl Sheet {
 
                 self.clear_cache();
             },
+            SheetMessage::AddToOrder(id)=>{
+                if self.order.contains(&id) {
+                    self.order.shift_remove(&id);
+                }
+                self.order.insert(id);
+                eprintln!("Add entity to order: {id:?}");
+            },
+            SheetMessage::FinishOrder(id)=>{
+                if self.order.contains(&id) {
+                    self.order.shift_remove(&id);
+                }
+                self.order.insert(id);
+                self.reorder = false;
+                eprintln!("Finish order with entity: {id:?}");
+            },
         }
 
         Task::none()
@@ -404,9 +469,21 @@ impl Sheet {
 
     pub fn delete_entity(&mut self, id: EntityId) {
         eprintln!("Delete entity: {id:?}");
-        self.entities.remove(&id);
+        let (model, _) = self.entities.remove(&id).unwrap();
+        self.order.shift_remove(&id);
         self.paths.remove(&id);
         self.cached_models.remove(&id);
+
+        if let Some(entities) = self.active_models.get_mut(&model) {
+            entities.remove(&id);
+            if entities.len() == 0 {
+                self.active_models.remove(&model);
+            }
+        }
+
+        if self.show_order {
+            self.clear_cache();
+        }
     }
 
     pub fn change_width(&mut self, width: f64) {
@@ -451,6 +528,7 @@ impl CanvasProgram<SheetMessage> for Sheet {
         bounds: Rectangle,
         _cursor: Cursor,
     ) -> Vec<<Renderer as GeometryRenderer>::Geometry> {
+        let text_color = theme.palette().text;
         let outline_color = theme.palette().primary;
         let sheet_fg_color = theme.palette().primary;
         let mut ret = Vec::new();
@@ -515,6 +593,9 @@ impl CanvasProgram<SheetMessage> for Sheet {
         // then the models
         for (id, cache) in self.cached_models.iter() {
             let (color, paths) = self.paths.get(id).unwrap();
+            let index = self.order.get_index_of(id)
+                .map(|i|format!("#{}", i + 1))
+                .unwrap_or(String::from("??"));
             ret.push(cache.draw(
                 renderer,
                 Size {
@@ -526,6 +607,17 @@ impl CanvasProgram<SheetMessage> for Sheet {
 
                     self.transform_frame(frame, size);
 
+                    if self.show_order || self.reorder {
+                        let mut text = CanvasText::from(index);
+                        text.position = paths.display_center;
+                        text.size = (16.0 / self.view.scale as f32).into();
+                        text.color = text_color;
+                        text.horizontal_alignment = HorizontalAlign::Center;
+                        text.vertical_alignment = VerticalAlign::Center;
+
+                        frame.fill_text(text);
+                    }
+
                     // Do the main path before the outline so the outline shows over the paths
                     for path in paths.lines.iter() {
                         self.draw_line(frame, &path, *color, 1.0);
@@ -533,11 +625,16 @@ impl CanvasProgram<SheetMessage> for Sheet {
 
                     // do the outline
                     match state {
-                        State::Move(idx, _)|State::Select(idx, _)|State::PanSelected(idx, ..)|State::DelaySelect(idx, ..)=>{
-                            if id == idx {
-                                self.draw_line(frame, &paths.outline, outline_color, 1.0);
-                            }
-                        },
+                        State::Move(idx, _)|
+                            State::Select(idx, _)|
+                            State::PanSelected(idx, ..)|
+                            State::DelaySelect(idx, ..)|
+                            State::OrderEditSelect(idx)|
+                            State::OrderEditPanSelect(idx, ..)=>{
+                                if id == idx {
+                                    self.draw_line(frame, &paths.outline, outline_color, 1.0);
+                                }
+                            },
                         _=>{},
                     }
                 },
@@ -563,6 +660,14 @@ impl CanvasProgram<SheetMessage> for Sheet {
         self.window_height.set(height);
         self.height_change.set(old_height == height);
 
+        if self.reorder {
+            match state {
+                State::OrderEdit|State::OrderEditSelect(_)=>{},
+                State::Select(id, ..)|State::DelaySelect(id, ..)=>*state = State::OrderEditSelect(*id),
+                _=>*state = State::OrderEdit,
+            }
+        }
+
         if cursor.is_over(bounds) {
             let cursor_pos = cursor.position_in(bounds)
                 .unwrap()
@@ -577,6 +682,21 @@ impl CanvasProgram<SheetMessage> for Sheet {
                     let movement = 1.0;
                     let id = match state {
                         State::Select(id, _)=>*id,
+                        State::OrderEditSelect(id)=>match e {
+                            KeyboardEvent::KeyPressed{key:Key::Named(NamedKey::Enter|NamedKey::Space),..}=>{
+                                eprintln!("Add {id:?} as index {}", self.order.len());
+
+                                let id = *id;
+                                *state = State::OrderEdit;
+                                if self.order.len() == self.entities.len() - 1 {
+                                    *state = State::Select(id, move_pos);
+                                    return (Status::Captured, Some(SheetMessage::FinishOrder(id)));
+                                } else {
+                                    return (Status::Captured, Some(SheetMessage::AddToOrder(id)));
+                                }
+                            },
+                            _=>return (Status::Ignored, None),
+                        },
                         _=>return (Status::Ignored, None),
                     };
                     match e {
@@ -597,6 +717,20 @@ impl CanvasProgram<SheetMessage> for Sheet {
                                 Status::Captured,
                                 Some(SheetMessage::Move(id, Vector::new(0.0, -movement))),
                             ),
+                            NamedKey::Delete=>{
+                                *state = State::None(move_pos);
+                                return (
+                                    Status::Captured,
+                                    Some(SheetMessage::Delete(id)),
+                                );
+                            },
+                            NamedKey::Escape=>{
+                                *state = State::None(move_pos);
+                                return (
+                                    Status::Captured,
+                                    Some(SheetMessage::Deselect(id)),
+                                );
+                            },
                             _=>{},
                         },
                         _=>{},
@@ -649,7 +783,7 @@ impl CanvasProgram<SheetMessage> for Sheet {
 
                                 if model.point_within(model_point) {
                                     match state {
-                                        State::Select(id2, _)|State::DelaySelect(id2, ..)=>{
+                                        State::Select(id2, _)|State::DelaySelect(id2, ..)|State::OrderEditSelect(id2)=>{
                                             if id == id2 || rc.contains(id) {
                                                 eprintln!("Click fallback {id:?}");
                                                 fallback_id = Some(*id);
@@ -675,6 +809,13 @@ impl CanvasProgram<SheetMessage> for Sheet {
                                                 *state = State::None(move_pos);
                                             }
                                         },
+                                        State::OrderEditSelect(id2)=>{
+                                            if id == id2 {
+                                                eprintln!("Cleared {id2:?}");
+                                                cleared = Some(*id);
+                                                *state = State::OrderEdit;
+                                            }
+                                        },
                                         _=>{},
                                     }
                                 }
@@ -694,6 +835,11 @@ impl CanvasProgram<SheetMessage> for Sheet {
                                         *state = State::DelaySelect(*current_id, id, move_pos);
                                         return (Status::Captured, None);
                                     },
+                                    State::OrderEdit|State::OrderEditSelect(_)=>{
+                                        eprintln!("Order Edit Select");
+                                        *state = State::OrderEditSelect(id);
+                                        return (Status::Captured, Some(SheetMessage::Select(id)));
+                                    },
                                     _=>{
                                         *state = State::Move(id, move_pos);
                                         return (Status::Captured, Some(SheetMessage::Select(id)));
@@ -702,11 +848,37 @@ impl CanvasProgram<SheetMessage> for Sheet {
                             }
 
                             if let Some(id) = cleared {
-                                eprintln!("Deselect {id:?}");
-                                *state = State::None(move_pos);
-                                return (Status::Captured, Some(SheetMessage::Deselect(id)));
+                                match state {
+                                    State::OrderEdit|State::OrderEditSelect(_)=>{
+                                        eprintln!("Deselect {id:?}");
+                                        *state = State::OrderEdit;
+                                        return (Status::Captured, Some(SheetMessage::Deselect(id)));
+                                    },
+                                    State::OrderEditPan(..)|State::OrderEditPanSelect(..)=>{
+                                        eprintln!("Deselect {id:?}");
+                                        *state = State::OrderEditPan(cursor_pos, move_pos);
+                                        return (Status::Captured, Some(SheetMessage::Deselect(id)));
+                                    },
+                                    _=>{
+                                        eprintln!("Deselect {id:?}");
+                                        *state = State::None(move_pos);
+                                        return (Status::Captured, Some(SheetMessage::Deselect(id)));
+                                    },
+                                }
                             }
                             match state {
+                                State::OrderEditSelect(id)=>{
+                                    let id = *id;
+                                    eprintln!("Deselect {id:?}");
+                                    *state = State::OrderEdit;
+                                    return (Status::Captured, Some(SheetMessage::Deselect(id)));
+                                },
+                                State::OrderEditPanSelect(id, ..)=>{
+                                    let id = *id;
+                                    eprintln!("Deselect {id:?}");
+                                    *state = State::OrderEditPan(cursor_pos, move_pos);
+                                    return (Status::Captured, Some(SheetMessage::Deselect(id)));
+                                },
                                 State::Select(id, _)|State::DelaySelect(id, ..)=>{
                                     let id = *id;
                                     eprintln!("Deselect {id:?}");
@@ -745,6 +917,8 @@ impl CanvasProgram<SheetMessage> for Sheet {
                                     *state = State::Pan(cursor_pos, move_pos);
                                     eprintln!("Start pan");
                                 },
+                                State::OrderEdit=>*state = State::OrderEditPan(cursor_pos, move_pos),
+                                State::OrderEditSelect(id)=>*state = State::OrderEditPanSelect(*id, cursor_pos, move_pos),
                                 _=>{},
                             }
                             return (Status::Captured, None);
@@ -759,13 +933,18 @@ impl CanvasProgram<SheetMessage> for Sheet {
                                     eprintln!("Stop pan with selection {id:?}");
                                     *state = State::Select(*id, move_pos);
                                 },
+                                State::OrderEditPan(..)=>*state = State::OrderEdit,
+                                State::OrderEditPanSelect(id, ..)=>*state = State::OrderEditSelect(*id),
                                 _=>{},
                             }
                             return (Status::Captured, None);
                         },
                         MouseEvent::CursorMoved{..}=>{
                             match state {
-                                State::Pan(prev, w_prev)|State::PanSelected(_, prev, w_prev)=>{
+                                State::Pan(prev, w_prev)|
+                                    State::PanSelected(_, prev, w_prev)|
+                                    State::OrderEditPan(prev, w_prev)|
+                                    State::OrderEditPanSelect(_, prev, w_prev)=>{
                                     let delta = cursor_pos - *prev;
                                     *prev = cursor_pos;
 
@@ -813,14 +992,13 @@ impl CanvasProgram<SheetMessage> for Sheet {
                                         self.recent_clicks.borrow_mut().clear();
                                     }
                                 },
+                                State::OrderEdit|State::OrderEditSelect(_)=>{},
                             }
                         },
                         MouseEvent::WheelScrolled{delta:ScrollDelta::Lines{y,..}}=>{
                             let msg = if y > 0.0 {
-                                eprintln!("Zoom in");
                                 SheetMessage::ZoomIn(cursor_pos, move_pos)
                             } else {
-                                eprintln!("Zoom out");
                                 SheetMessage::ZoomOut(cursor_pos, move_pos)
                             };
                             return (Status::Captured, Some(msg));

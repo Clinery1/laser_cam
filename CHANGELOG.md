@@ -1,3 +1,17 @@
+# 0.2.2
+## Additions
+- GRBL comment mode. Since GRBL doesn't like normal GCODE comments (`(comment here)`) I have added a
+    toggle for comments specific to GRBL (`; comment here`)
+- Part reordering. Gone are the days of parts being cut in the wrong order! No more cutting a part
+    before it is etched!
+- Add a "clear models" button to remove all models from the model store during this execution of the
+    program. Useful for doing multiple nests without relaunching the program.
+- Added a way to visualize the order of an entire nest of parts.
+
+## Changes
+- Changed the layout of some buttons to make it better
+
+
 # 0.2.1
 ## Additions
 - Added an `ArcToLines` type that takes an arc and generates line segments roughly corresponding to

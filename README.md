@@ -28,7 +28,7 @@ A collection of lines that form a part with a single possibly convex outline and
 An area that represents some physical material where entities can be moved, rotated, and scaled.
 
 
-## List of features (roadmap)
+## Roadmap (also a list of features)
 - 🗹 DXF Loading
 - 🗹 Recognize lines from line segments
 - 🗹 Rotate parts if they are not in the XY plane
@@ -48,17 +48,25 @@ An area that represents some physical material where entities can be moved, rota
 
 - 🗹 GCODE output of the nested program
 
-- ☐ Rectangle selection thing
-
 - 🗹 Configurable "laser conditions" where the laser operates at different powers, speeds, and passes
 - 🗹 Per-entity laser conditions
 - 🗹 Coloring of lines with different laser conditions
 
-- ☐ GCODE simulator with coloring
+- 🗹 A way to adjust the cutting order of entities
+
+- ☐ Redo how entities are stored and make each line a child of the entity
+
+- ☐ Sheet storage where you can make preset sheet sizes
+- ☐ Change the sheet view to display the list of presets or a "Custom" option that shows the width
+    and height buttons
+
+- ☐ Rectangle selection thing
 
 - ☐ Detection of out-of-bounds entities using the outline and sheet border
 
 - ☐ Saving and loading nested sheets
+
+- ☐ GCODE simulator with coloring
 
 
 ## Screenshots

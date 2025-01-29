@@ -36,10 +36,15 @@ impl Display for GcodeInstruction {
 
 #[derive(Default)]
 pub struct GcodeBuilder {
+    grbl_comments: bool,
     inner: Vec<GcodeBlock>,
     current_block: GcodeBlock,
 }
 impl GcodeBuilder {
+    pub fn set_grbl_mode(&mut self) {
+        self.grbl_comments = true;
+    }
+
     /// This inserts a header with G54, G17, G21, G90, G94
     pub fn default_header(&mut self) {
         let mut block = GcodeBlock::default();
@@ -145,7 +150,11 @@ impl GcodeBuilder {
 
         let mut out = String::new();
         for block in self.inner {
-            write!(&mut out, "{block}\n").unwrap();
+            if self.grbl_comments {
+                write!(&mut out, "{block:#}\n").unwrap();
+            } else {
+                write!(&mut out, "{block}\n").unwrap();
+            }
         }
 
         return out;
@@ -182,11 +191,19 @@ impl Display for GcodeBlock {
 
             // we add a space before the comment to separate it from the actual gcode
             if let Some(comment) = &self.1 {
-                write!(f, " ({comment})")?;
+                if f.alternate() {
+                    write!(f, " ; {comment}")?;
+                } else {
+                    write!(f, " ({comment})")?;
+                }
             }
         } else {
             if let Some(comment) = &self.1 {
-                write!(f, "({comment})")?;
+                if f.alternate() {
+                    write!(f, "; {comment}")?;
+                } else {
+                    write!(f, " ({comment})")?;
+                }
             }
         }
 

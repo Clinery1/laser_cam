@@ -12,6 +12,10 @@ use iced::{
         text,
         self,
     },
+    alignment::{
+        Vertical as VerticalAlign,
+        Horizontal as HorizontalAlign,
+    },
     event::{
         Event,
         self,
@@ -93,6 +97,10 @@ pub enum Message {
     DeleteEntity,
 
     ToggleConditionEditor,
+
+    ClearModels,
+
+    ToggleGrblComment(bool),
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -254,21 +262,20 @@ impl MainProgram {
                     |named_sheet|Message::SelectSheet(named_sheet.index),
                 ),
 
-                widget::button("New sheet")
-                    .on_press(Message::NewSheet),
 
-                widget::Space::with_height(15.0),
+                row![
+                    widget::button("New sheet")
+                        .on_press(Message::NewSheet),
+
+                    widget::Space::with_width(Length::Fill),
+
+                    widget::button("Delete sheet")
+                        .style(danger_button)
+                        .on_press(Message::DeleteSheet),
+                ].spacing(5.0),
 
                 widget::button("Laser condition editor")
                     .on_press(Message::ToggleConditionEditor),
-
-                widget::Space::with_height(5.0),
-
-                widget::button("Delete sheet")
-                    .style(danger_button)
-                    .on_press(Message::DeleteSheet),
-
-                widget::Space::with_height(5.0),
 
                 row![
                     "Rename: ",
@@ -297,9 +304,36 @@ impl MainProgram {
                         .on_input(Message::ChangeSheetHeight),
                 ],
 
-                widget::button("Save GCODE")
-                    .on_press(Message::OpenGcodeSaveDialog)
+                widget::button("Reorder entities")
+                    .on_press(Message::Sheet(SheetMessage::StartOrder)),
+
+                row![
+                    text!("Entity order visibility"),
+                    widget::toggler(self.sheets[self.active_sheet].show_order)
+                        .on_toggle(|b|Message::Sheet(SheetMessage::SetShowOrder(b)))
+                ]
+                    .align_y(VerticalAlign::Center)
+                    .spacing(5.0),
+
+                row![
+                    widget::button("Save GCODE")
+                        .on_press(Message::OpenGcodeSaveDialog),
+
+                    column![
+                        text!("GRBL comments"),
+
+                        widget::toggler(self.sheets[self.active_sheet].grbl_comments)
+                            .on_toggle(Message::ToggleGrblComment)
+                    ]
+                        .align_x(HorizontalAlign::Center)
+                        .spacing(5.0)
+                ]
+                    .height(Length::Shrink)
+                    .align_y(VerticalAlign::Center)
+                    .spacing(5.0),
             ]
+                .align_x(HorizontalAlign::Center)
+                .spacing(5.0)
                 .padding(5.0)
         )
             .width(Length::Fill)
@@ -310,8 +344,24 @@ impl MainProgram {
         let mut column_items = Vec::new();
 
         column_items.push(row![
-            widget::button("Load new model")
+            widget::button(
+                text!("Load model")
+                    .center()
+                    .width(Length::Fill)
+            )
+                .width(Length::FillPortion(1))
                 .on_press(Message::OpenFilePicker),
+
+            widget::Space::with_width(Length::FillPortion(1)),
+
+            widget::button(
+                text!("Clear models")
+                    .center()
+                    .width(Length::Fill)
+            )
+                .width(Length::FillPortion(1))
+                .style(danger_button)
+                .on_press(Message::ClearModels),
         ].into());
 
         column_items.push(widget::Space::with_height(10.0).into());
@@ -448,30 +498,35 @@ impl MainProgram {
             Message::Sheet(msg)=>{
                 match msg {
                     SheetMessage::Select(id)|SheetMessage::SelectMove(id, _)=>{
-                        let mt = &self.sheets[self.active_sheet]
-                            .entities[&id].1;
-                        let rotation = mt.transform.rotation.normalized();
-                        let mut vec = Vector::new(1.0, 0.0);
-                        rotation.rotate_vec(&mut vec);
-                        let mut angle = vec.y.atan2(vec.x).to_degrees();
-                        if angle < 0.0 {
-                            angle += 360.0;
-                        }
-                        self.entity_params = Some(EntityParams {
-                            id,
-                            x: mt.transform.translation.x.to_string(),
-                            y: mt.transform.translation.y.to_string(),
-                            angle,
-                            angle_string: angle.to_string(),
-                            scale: mt.transform.scale.to_string(),
-                            flip: mt.flip,
-                            laser_condition: mt.laser_condition,
-                        });
+                        if !self.sheets[self.active_sheet].reorder {
+                            let mt = &self.sheets[self.active_sheet]
+                                .entities[&id].1;
+                            let rotation = mt.transform.rotation.normalized();
+                            let mut vec = Vector::new(1.0, 0.0);
+                            rotation.rotate_vec(&mut vec);
+                            let mut angle = vec.y.atan2(vec.x).to_degrees();
+                            if angle < 0.0 {
+                                angle += 360.0;
+                            }
+                            self.entity_params = Some(EntityParams {
+                                id,
+                                x: mt.transform.translation.x.to_string(),
+                                y: mt.transform.translation.y.to_string(),
+                                angle,
+                                angle_string: angle.to_string(),
+                                scale: mt.transform.scale.to_string(),
+                                flip: mt.flip,
+                                laser_condition: mt.laser_condition,
+                            });
 
-                        self.close_entity_params();
-                        self.open_entity_params();
+                            self.close_entity_params();
+                            self.open_entity_params();
+                        } else {
+                            self.entity_params = None;
+                            self.close_entity_params();
+                        }
                     },
-                    SheetMessage::Deselect(_)=>{
+                    SheetMessage::Deselect(_)|SheetMessage::Delete(_)=>{
                         self.entity_params = None;
                         self.close_entity_params();
                     },
@@ -504,6 +559,7 @@ impl MainProgram {
                 return self.conditions.update(msg).map(Message::Condition);
             },
             Message::RenameSheet(name)=>self.sheet_settings[self.active_sheet].name = name,
+            Message::ToggleGrblComment(b)=>self.sheets[self.active_sheet].grbl_comments = b,
             Message::NewSheet=>{
                 self.active_sheet = self.sheets.len();
                 self.sheet_settings.push(SheetIndex {
@@ -750,6 +806,7 @@ impl MainProgram {
                     return window::get_latest().and_then(window::close);
                 }
             }
+            Message::ClearModels=>self.models.clear(),
         }
 
         return Task::none();
@@ -826,7 +883,7 @@ impl Default for MainProgram {
                 a: Box::new(Configuration::Pane(ProgramPane::Sheet)),
                 b: Box::new(Configuration::Split {
                     axis: Axis::Horizontal,
-                    ratio: 0.45,
+                    ratio: 0.5,
                     a: Box::new(Configuration::Pane(ProgramPane::SheetList)),
                     b: Box::new(Configuration::Pane(ProgramPane::ModelList)),
                 }),

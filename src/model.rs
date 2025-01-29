@@ -3,6 +3,7 @@ use dxf::{
     Drawing,
 };
 use geo::{
+    Centroid,
     MultiPolygon,
     Coord,
     LineString,
@@ -412,6 +413,11 @@ impl Model {
         let ret = ModelPaths {
             outline: builder.build(),
             lines: paths,
+            display_center: self.shape.hull.centroid()
+                .unwrap().0
+                .transformed(mt.transform)
+                .to_ydown(height)
+                .to_iced(),
         };
 
         return ret;
@@ -460,6 +466,7 @@ pub struct Segment(pub Point, pub Point);
 pub struct ModelPaths {
     pub outline: Path,
     pub lines: Vec<Path>,
+    pub display_center: iced::Point,
 }
 
 /// The ID of a [`Model`] stored in a [`ModelStore`].
@@ -521,6 +528,10 @@ impl ModelStore {
     /// Create an iterator over all the models
     pub fn iter<'a>(&'a self)->ModelIter<'a> {
         ModelIter(0, self.0.borrow())
+    }
+
+    pub fn clear(&self) {
+        self.0.borrow_mut().clear();
     }
 }
 pub struct ModelIter<'a>(usize, Ref<'a, Vec<Arc<Model>>>);
